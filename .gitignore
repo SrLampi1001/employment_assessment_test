@@ -30,3 +30,11 @@ dist/
 .DS_Store
 Thumbs.db
 *.swp.playwright-mcp/
+
+# Playwright MCP screenshots — per DECISIONS.md (Human) the PNGs are
+# noise in the repo root. The AI agent saves them to this gitignored
+# folder and asks the user to manually drag-and-drop them into the
+# corresponding PR or Issue (the GitHub API + gh CLI do not support
+# image upload for issue comments). See AGENTS.md / "Playwright
+# screenshots".
+.playwright-screenshots/

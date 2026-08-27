@@ -171,7 +171,50 @@ The follow-up commit uses a `chore(skills):` prefix and is **feature-branch-scop
 
 ### Why this matters
 
-The alternative is the skill becoming a "second source of truth" that contradicts the code. Once the AI has read both, it can't tell which one to follow — and it will pick the one that fits its training-data priors, which is usually the wrong one. The first time this drifts, it becomes a permanent habit.
+The alternative is the skill becoming a "second source of truth" that contradicts the code. Once the has read both, it can't tell which one to follow — and it will pick the one that fits its training-data priors, which is usually the wrong one. The first time this drifts, it becomes a permanent habit.
+
+---
+
+## Playwright screenshots (per `docs/DECISIONS.md` — Human)
+
+**The agent verifies the frontend end-to-end with the Playwright MCP before any PR that touches the UI**, but the resulting PNGs are **noise in the repo** and must never be committed. Per the Human section in `docs/DECISIONS.md`:
+
+1. Save screenshots to `./.playwright-screenshots/` (already in `.gitignore`).
+2. Reference the screenshot path in the PR description so a human reviewer can drag-and-drop it into the PR / Issue conversation via the GitHub web UI.
+3. **Do NOT** commit the PNGs to the repo root or any other versioned directory.
+
+### Why the agent can't upload to GitHub directly
+
+Neither the GitHub MCP nor the `gh` CLI can upload binary attachments to issue / PR comments. The relevant surfaces:
+
+| Tool | Image upload? | Why not |
+|---|---|---|
+| `github_add_issue_comment` (MCP) | ❌ | Body is `text/markdown` only. |
+| `gh issue comment --body-file` | ❌ | Same — markdown body only. |
+| `gh api` / GitHub REST API | ❌ | `POST /repos/{owner}/{repo}/issues/{n}/comments` accepts `body` (markdown). Binary upload is **web-UI drag-and-drop only** (uploads to GitHub's own image host). |
+| GitHub web UI | ✅ | The only path that works. |
+
+### Workflow for every PR that touches the frontend
+
+```bash
+# 1. Start the dev stack (see AGENTS.md / Skill Maintenance or the dev_app.py docstring)
+./backend/.venv/bin/python -m uvicorn dev_app:app --host 0.0.0.0 --port 8000 &
+cd frontend && npm run dev &
+
+# 2. Use the Playwright MCP (playwright_browser_navigate / click / snapshot /
+#    take_screenshot) to drive the happy path.
+
+# 3. Save the PNG to the gitignored folder (the MCP tool's `filename` arg
+#    should point there, e.g. `./.playwright-screenshots/phase4_e2e_verified.png`).
+#    NEVER the repo root.
+
+# 4. In the PR description, link the screenshot path so the human reviewer
+#    can drag-and-drop it from disk into the PR conversation. Do NOT
+#    try to push the PNG to the issue via gh or the MCP.
+
+# 5. Commit a one-liner: "test(frontend): Playwright MCP e2e verified
+#    (screenshot in .playwright-screenshots/, see PR body)" — no binary.
+```
 
 ---
 
@@ -179,8 +222,10 @@ The alternative is the skill becoming a "second source of truth" that contradict
 - [ ] Branch follows naming convention.
 - [ ] Commit messages are conventional.
 - [ ] Mermaid diagrams replace static images/text.
+- [ ] No PNGs / screenshots committed to the repo (Playwright artifacts live in `./.playwright-screenshots/`, gitignored).
 - [ ] No secrets in code (use `.env`).
 - [ ] Tests pass locally.
+- [ ] Playwright MCP verification ran end-to-end when the PR touches the frontend; the screenshot path is referenced in the PR body for human upload.
 - [ ] Documentation updated (if applicable).
 
 ---

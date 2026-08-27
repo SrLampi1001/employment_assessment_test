@@ -506,3 +506,11 @@ frontend/src/
 - **No `load more` "scroll position preserved"** in the conversation view (the issue review checklist). The lazy-keyset SQL is correct (the cursor is the oldest message in view) but the current UI is a button, not an infinite scroll, so the scroll position is not yet at risk of being lost.
 - **`rw_send_message` requires dropping + recreating the function** to change the OUT-parameter signature. A future `ALTER FUNCTION` migration that adds new OUT params without dropping is unsafe in plpgsql; the `DROP FUNCTION` + `CREATE OR REPLACE` pattern is the only safe path. Documented in `Step 9.5` of the postgres-rls-pgvector skill.
 
+---
+## Playwright screenshot compliance (Human)
+The png files inside the repository are noise to avoid, they should not be versioned and do not correspond to the repository information.
+
+But the compliance with screenshots is important, therefore: 
+- The AI Agent should create a dedicated folder for the screenshot (And add it to .gitignore)
+- When creating a screenshot, as the user to manually add the image in the corresponding PR or Issue (See issue [#4 comment]https://github.com/SrLampi1001/employment_assessment_test/issues/4#issuecomment-5442930233)
+
