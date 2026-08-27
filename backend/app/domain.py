@@ -34,6 +34,32 @@ class User:
 
 
 @dataclass(frozen=True)
+class Channel:
+    rw_id: UUID
+    rw_name: str
+    rw_kind: int  # 1 = direct, 2 = group (see ChannelKind)
+    rw_created_by: UUID
+    rw_created_at: datetime
+
+
+@dataclass(frozen=True)
+class ChannelMember:
+    rw_id: UUID
+    rw_channel_id: UUID
+    rw_user_id: UUID
+    rw_role: int  # 1 = member, 2 = owner (see ChannelRole)
+    rw_joined_at: datetime
+    rw_left_at: datetime | None
+
+
+# Phase 3 — channel kind + role enums (smallint values match the DB).
+DIRECT = 1
+GROUP = 2
+MEMBER = 1
+OWNER = 2
+
+
+@dataclass(frozen=True)
 class RefreshTokenRecord:
     rw_id: UUID
     rw_user_id: UUID
@@ -87,6 +113,47 @@ class RefreshTokenStore(Protocol):
 class UserRepository(Protocol):
     def find_by_username(self, username: str) -> tuple[User, str] | None:
         """Returns `(user, password_hash)`. None if the username is unknown."""
+        ...
+
+    def search_by_username_prefix(self, prefix: str, limit: int) -> list[User]:
+        """Find users whose username starts with `prefix`. Used by the
+        channel-member invite UI to suggest users to add. RLS on
+        `rw_user` is not enabled (it carries no private data), so this
+        is a straight SELECT. Capped at `limit`."""
+        ...
+
+
+class ChannelRepository(Protocol):
+    def list_visible(self) -> list[tuple[Channel, ChannelMember]]:
+        """Returns `(channel, actor_membership)` pairs for every channel
+        the actor is a current member of. RLS gates the read; the join
+        to `rw_channel_member` is also RLS-filtered to the actor's own
+        membership rows (the policy is `rw_user_id = GUC`)."""
+        ...
+
+    def find(self, channel_id: UUID) -> Channel | None:
+        """Returns the channel if the actor can see it; `None` otherwise
+        (RLS returns no rows when the actor is not a member)."""
+        ...
+
+    def create(self, *, name: str, kind: int, creator_id: UUID) -> UUID:
+        """Thin wrapper around `rw_create_channel(...)`. Returns the new
+        channel id. The DB function inserts the channel + the creator's
+        owner membership in one statement (Phase 1, 0040)."""
+        ...
+
+
+class ChannelMemberRepository(Protocol):
+    def add(self, *, channel_id: UUID, inviter_id: UUID,
+            new_member_id: UUID, role: int = MEMBER) -> ChannelMember:
+        """Calls `rw_add_channel_member(...)`. Raises the function's
+        EXCEPTIONs as `ChannelError` subclasses in the use case."""
+        ...
+
+    def leave(self, *, channel_id: UUID, user_id: UUID) -> bool:
+        """Sets `rw_left_at = now()` on the actor's current membership.
+        Returns True if a row was updated, False if the actor was not
+        a current member. Idempotent — leaving twice is a no-op."""
         ...
 
 

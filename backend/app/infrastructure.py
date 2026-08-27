@@ -27,7 +27,14 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from psycopg import Connection
 
 from .domain import (
+    Channel,
+    ChannelMember,
+    ChannelMemberRepository,
+    ChannelRepository,
+    DIRECT,
+    GROUP,
     JwtService,
+    MEMBER,
     PasswordHasher,
     RefreshTokenRecord,
     RefreshTokenStore,
@@ -198,6 +205,150 @@ class PostgresUserRepository:
                 rw_created_at=row[4],
             )
             return user, row[5]
+
+    def search_by_username_prefix(self, prefix: str, limit: int) -> list[User]:
+        """Prefix search for the invite-user UI.
+
+        `rw_user` has no RLS (carries no private data — locale + name
+        are visible to any logged-in actor). The query is parameterized;
+        no string concatenation.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_id, rw_username, rw_display_name, rw_locale, rw_created_at "
+                "FROM rw_user "
+                "WHERE rw_username ILIKE %s "
+                "ORDER BY rw_username "
+                "LIMIT %s",
+                (f"{prefix}%", limit),
+            )
+            rows = cur.fetchall()
+            return [
+                User(
+                    rw_id=r[0],
+                    rw_username=r[1],
+                    rw_display_name=r[2],
+                    rw_locale=r[3],
+                    rw_created_at=r[4],
+                )
+                for r in rows
+            ]
+
+
+class PostgresChannelRepository:
+    """Channel reads + the channel-create DB call.
+
+    Reads use `rw_channel` directly — the RLS policy on that table lets
+    the actor see only channels they're a current member of, so a
+    `SELECT *` returns the right list without explicit filters.
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def list_visible(self) -> list[tuple[Channel, ChannelMember]]:
+        """Channel + the actor's own membership (for the actor's role).
+
+        The join to `rw_channel_member` is RLS-filtered to the actor's
+        own rows (`rw_user_id = GUC`), so each `ch` row gets at most one
+        matching membership — the actor's own.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT ch.rw_id, ch.rw_name, ch.rw_kind, ch.rw_created_by, "
+                "       ch.rw_created_at, "
+                "       m.rw_id, m.rw_channel_id, m.rw_user_id, m.rw_role, "
+                "       m.rw_joined_at, m.rw_left_at "
+                "FROM rw_channel ch "
+                "JOIN rw_channel_member m ON m.rw_channel_id = ch.rw_id "
+                "WHERE m.rw_left_at IS NULL "
+                "ORDER BY ch.rw_created_at DESC"
+            )
+            rows = cur.fetchall()
+            return [
+                (
+                    Channel(
+                        rw_id=r[0],
+                        rw_name=r[1],
+                        rw_kind=r[2],
+                        rw_created_by=r[3],
+                        rw_created_at=r[4],
+                    ),
+                    ChannelMember(
+                        rw_id=r[5],
+                        rw_channel_id=r[6],
+                        rw_user_id=r[7],
+                        rw_role=r[8],
+                        rw_joined_at=r[9],
+                        rw_left_at=r[10],
+                    ),
+                )
+                for r in rows
+            ]
+
+    def find(self, channel_id: UUID) -> Channel | None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_id, rw_name, rw_kind, rw_created_by, rw_created_at "
+                "FROM rw_channel WHERE rw_id = %s AND rw_deleted_at IS NULL",
+                (channel_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return Channel(*row)
+
+    def create(self, *, name: str, kind: int, creator_id: UUID) -> UUID:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_create_channel(%s, %s, %s)",
+                (name, kind, creator_id),
+            )
+            return cur.fetchone()[0]
+
+
+class PostgresChannelMemberRepository:
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def add(
+        self,
+        *,
+        channel_id: UUID,
+        inviter_id: UUID,
+        new_member_id: UUID,
+        role: int = MEMBER,
+    ) -> ChannelMember:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_id, rw_channel_id, rw_user_id, rw_role, "
+                "       rw_joined_at, rw_left_at "
+                "FROM rw_add_channel_member(%s, %s, %s, %s)",
+                (channel_id, inviter_id, new_member_id, role),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "rw_add_channel_member returned no row (should not happen)"
+                )
+            return ChannelMember(*row)
+
+    def leave(self, *, channel_id: UUID, user_id: UUID) -> bool:
+        """Idempotent leave: returns True iff a row was just changed.
+
+        The actor updates their own row (`rw_user_id = GUC`), which is
+        allowed by the RLS policy (FOR ALL … USING rw_user_id = GUC).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE rw_channel_member "
+                "SET rw_left_at = now() "
+                "WHERE rw_channel_id = %s "
+                "  AND rw_user_id    = %s "
+                "  AND rw_left_at   IS NULL",
+                (channel_id, user_id),
+            )
+            return cur.rowcount > 0
 
 
 class PostgresRefreshTokenStore:
