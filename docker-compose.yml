@@ -1,0 +1,44 @@
+# Phase 0 — local development stack.
+# Phase 0 only brings up the database. Backend + frontend services land in
+# Phase 2 (auth) and Phase 3 (channels) respectively.
+#
+# Run from the project root:
+#   docker compose up -d
+# Then verify:
+#   docker compose exec db psql -U postgres -d riwi -c "\dx"
+#   docker compose exec db psql -U postgres -d riwi -c "\du rw_app"
+#   docker compose exec db psql -U postgres -d riwi -tAc \
+#     "SELECT rolname || ' | super=' || rolsuper || ' | bypassrls=' || rolbypassrls \
+#      FROM pg_roles WHERE rolname IN ('rw_app','rw_app_login','rw_migrator') ORDER BY rolname;"
+
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    container_name: riwi-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: riwi
+    # Host port 5433 to avoid clashing with any local Postgres already on
+    # 5432 (the user is running postgres-16 on the host). The container's
+    # internal port is still 5432, so `docker compose exec db psql ...`
+    # works exactly as documented in the Phase 0 issue.
+    ports:
+      - "5433:5432"
+    volumes:
+      # PG18 stores data at /var/lib/postgresql/<version>/data internally;
+      # mount the named volume at /var/lib/postgresql so the entrypoint can
+      # lay out its own subdirectory (required by PG18+ for `pg_upgrade`
+      # compatibility — see docker-library/postgres#1259).
+      - db_data:/var/lib/postgresql
+      # Phase 0 init scripts — run on first start only.
+      - ./db/migrations/0001_extensions.sql:/docker-entrypoint-initdb.d/001_extensions.sql:ro
+      - ./db/migrations/0002_roles.sql:/docker-entrypoint-initdb.d/002_roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d riwi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:
