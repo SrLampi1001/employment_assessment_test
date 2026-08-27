@@ -2,6 +2,10 @@
 # Phase 0 only brings up the database. Backend + frontend services land in
 # Phase 2 (auth) and Phase 3 (channels) respectively.
 #
+# All ports and credentials are sourced from `.env` at the project root
+# (with `${VAR:-default}` fallbacks so the stack still boots if `.env`
+# is missing). See docs/DECISIONS.md "Phase 0 — No hardcoded ports".
+#
 # Run from the project root:
 #   docker compose up -d
 # Then verify:
@@ -16,15 +20,14 @@ services:
     image: pgvector/pgvector:pg18
     container_name: riwi-db
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: riwi
-    # Host port 5433 to avoid clashing with any local Postgres already on
-    # 5432 (the user is running postgres-16 on the host). The container's
-    # internal port is still 5432, so `docker compose exec db psql ...`
-    # works exactly as documented in the Phase 0 issue.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-riwi}
     ports:
-      - "5433:5432"
+      # ${POSTGRES_PORT:-5433}:5432 — internal PG port stays 5432 so
+      # `docker compose exec db psql ...` works exactly as documented;
+      # only the host-side mapping comes from .env.
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       # PG18 stores data at /var/lib/postgresql/<version>/data internally;
       # mount the named volume at /var/lib/postgresql so the entrypoint can
