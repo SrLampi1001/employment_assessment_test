@@ -14,10 +14,18 @@ from typing import Any
 from fastapi import FastAPI
 
 from .auth import Login, Refresh, RegisterUser
+from .channels import AddMember, CreateChannel, LeaveChannel, ListVisibleChannels
 from .config import Settings
-from .delivery import JwtAuthMiddleware, build_auth_router, build_me_router
+from .delivery import (
+    JwtAuthMiddleware,
+    build_auth_router,
+    build_channels_router,
+    build_me_router,
+)
 from .infrastructure import (
     Argon2idHasher,
+    PostgresChannelMemberRepository,
+    PostgresChannelRepository,
     PostgresRefreshTokenStore,
     PostgresUserRepository,
     PyJwtService,
@@ -39,7 +47,7 @@ def create_app(
             `settings.database_url`. Tests pass a testcontainer-backed
             factory.
     """
-    app = FastAPI(title="Riwi Co. Messaging Platform — Auth")
+    app = FastAPI(title="Riwi Co. Messaging Platform")
 
     jwt_service = PyJwtService(
         settings.jwt_secret,
@@ -54,6 +62,7 @@ def create_app(
 
     factory = session_factory or make_session_factory(settings.database_url)
 
+    # ── Phase 2 use cases (auth) ────────────────────────────────────────
     register_user = RegisterUser(factory, hasher)
     login = Login(
         session_factory=factory,
@@ -70,6 +79,29 @@ def create_app(
         refresh_ttl_seconds=settings.refresh_ttl_seconds,
     )
 
+    # ── Phase 3 use cases (channels) ────────────────────────────────────
+    create_channel = CreateChannel(
+        session_factory=factory,
+        channel_repo_factory=PostgresChannelRepository,
+        channel_member_repo_factory=PostgresChannelMemberRepository,
+        user_repo_factory=PostgresUserRepository,
+    )
+    add_member = AddMember(
+        session_factory=factory,
+        channel_repo_factory=PostgresChannelRepository,
+        channel_member_repo_factory=PostgresChannelMemberRepository,
+    )
+    list_visible = ListVisibleChannels(
+        session_factory=factory,
+        channel_repo_factory=PostgresChannelRepository,
+    )
+    leave_channel = LeaveChannel(
+        session_factory=factory,
+        channel_repo_factory=PostgresChannelRepository,
+        channel_member_repo_factory=PostgresChannelMemberRepository,
+    )
+
+    # ── Routers ─────────────────────────────────────────────────────────
     app.include_router(
         build_auth_router(
             register_user=register_user,
@@ -77,8 +109,16 @@ def create_app(
             refresh=refresh,
         )
     )
-    # /me is Phase 2's target for the middleware tests. Phase 3 will
-    # replace it with the real profile route + PATCH /me for locale.
     app.include_router(build_me_router())
+    app.include_router(
+        build_channels_router(
+            create_channel=create_channel,
+            add_member=add_member,
+            list_visible=list_visible,
+            leave_channel=leave_channel,
+            user_repo_factory=PostgresUserRepository,
+            session_factory=factory,
+        )
+    )
 
     return app

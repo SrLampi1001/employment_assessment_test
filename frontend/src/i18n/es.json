@@ -1,0 +1,29 @@
+{
+  "app": {
+    "title": "Riwi Co. — Mensajería interna"
+  },
+  "auth": {
+    "login": "Iniciar sesión",
+    "username": "Usuario",
+    "password": "Contraseña",
+    "submit": "Entrar",
+    "logout": "Salir",
+    "logged_in_as": "Sesión iniciada como {{name}}",
+    "invalid_credentials": "Usuario o contraseña incorrectos",
+    "create_account": "Crear cuenta",
+    "back_to_sign_in": "Volver a iniciar sesión"
+  },
+  "channels": {
+    "title": "Conversaciones",
+    "empty": "Aún no tienes conversaciones",
+    "new_group": "Nuevo grupo",
+    "new_direct": "Mensaje directo",
+    "create": "Crear",
+    "name": "Nombre",
+    "other_username": "Usuario con quien conversar",
+    "cancel": "Cancelar",
+    "leave": "Salir",
+    "owner_badge": "Propietario",
+    "member_badge": "Miembro"
+  }
+}

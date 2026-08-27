@@ -206,6 +206,26 @@ def http_client(pg_app_session_factory, pg_app_url: str):
     return TestClient(app)
 
 
+@pytest.fixture
+def ctx() -> dict:
+    """Mutable per-scenario state shared across BDD step definitions.
+
+    Lives in `conftest.py` because pytest-bdd's auto-fixture lookup
+    sees module-level fixtures only when they're in a conftest or in
+    the same module as the scenario. Step files in `tests/step_defs/`
+    then pull `ctx` as a parameter. See `tests/step_defs/test_auth.py`
+    and `tests/step_defs/test_channels.py` for the consumers.
+    """
+    return {
+        "users": {},          # username -> password
+        "tokens": {},         # username -> {access, refresh}
+        "channels": {},       # channel_name -> channel_id
+        "first_refresh": {},  # username -> original refresh token
+        "registered": {},     # username -> password (also in users)
+        "last_response": None,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _seed(super_conn: psycopg.Connection) -> None:
     """Seed the two BDD scenarios with their canonical dataset.
