@@ -227,16 +227,21 @@ def create_app(
 
         embedder = FakeEmbeddingProvider()
         chatter = FakeChatProvider()
-    elif embedder is None:
-        try:
-            embedder = _build_embedder()
-        except ProviderError:
-            embedder = _UnconfiguredEmbeddingProvider()
-    elif chatter is None:
-        try:
-            chatter = _build_chatter()
-        except ProviderError:
-            chatter = _UnconfiguredChatProvider()
+    else:
+        # Each provider is built independently — the earlier `elif`
+        # chain skipped the chatter build whenever the embedder branch
+        # had already run, which left `chatter is None` for production
+        # apps with both API keys set (the live Mistral + NVIDIA path).
+        if embedder is None:
+            try:
+                embedder = _build_embedder()
+            except ProviderError:
+                embedder = _UnconfiguredEmbeddingProvider()
+        if chatter is None:
+            try:
+                chatter = _build_chatter()
+            except ProviderError:
+                chatter = _UnconfiguredChatProvider()
 
     ask_copilot_uc = AskCopilot(
         session_factory=factory,
