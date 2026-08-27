@@ -655,3 +655,60 @@ Branch `feat/phase-6-copilot` on top of `develop` (after Phase 5 merge). Eight c
 - **No rate-limit per actor.** The copilot endpoints have no per-user rate limit. A malicious actor could burn the Mistral / NVIDIA free tier. Phase 7 adds a token-bucket per actor (Redis-backed or in-process).
 - **`rw_copilot_usage` has no RLS policy yet.** It's a new table with `actor_id`; the standard pattern is a `USING (actor_id = current_setting('app.current_user_id')::uuid)` policy. Will be added in the Phase 7 cleanup migration.
 
+---
+
+## Phase 6 — Live finish-up (AI-assistant)
+
+The Phase 6 PR (#16) shipped the ports, adapters, use case, routes, BDD scenarios, unit tests, and frontend panel — but was never exercised end-to-end **against the real Mistral + NVIDIA endpoints** in this sandbox. Three latent bugs were blocking the live path; all three are fixed in this entry, and the live smoke (real keys, real DB, real LLM round-trip) now passes end-to-end.
+
+### Bugs found + fixed
+
+1. **`create_app` left `chatter = None` in production** — `app/main.py:230-239`. The provider-construction branch was a chained `if / elif / elif`, so when both `embedder` and `chatter` were `None` (the production case with real keys) only the **embedder** branch fired; `chatter` stayed `None` and the `AskCopilot` use case crashed with `AttributeError: 'NoneType' object has no attribute 'chat'` on the first request. Fix: split the two provider builds into independent `if embedder is None:` / `if chatter is None:` blocks under a single `else:` arm. The dev-mode-fakes branch is unchanged. The BDD tests missed this because they inject both providers via the `http_client` fixture (`tests/conftest.py`); only a live boot with both API keys exposed the bug.
+
+2. **BDD `push_back` step was broken** — `tests/step_defs/test_copilot.py:188-193`. The step tried to mutate `fake_chat_module._next_response`, which the previous "fix: backend check" commit had renamed to `_SHARED_RESPONSE` *and* gated behind a new `use_shared=True` flag on `FakeChatProvider`. The mutation silently failed (Python setattr on a non-existent module attribute), so the safe-comply BDD Scenario C used the **default** `deny:insufficient-context` for both calls and would have falsely passed. Fix: rewrite the step to call `set_response(...)` (the public API on `tests/fake_chat_provider.py`), and update the `http_client` fixture to construct the chatter with `use_shared=True` so the BDD shared state is the source of truth.
+
+3. **`uv.lock` was never regenerated when Phase 6 added `mistralai`** — `pyproject.toml` was updated in commit 9caecbf but the lockfile was not. AGENTS.md explicitly forbids "Adding a runtime dependency without updating `pyproject.toml` AND the lockfile in the same commit"; the live install pulled an older resolution. Fix: `uv sync --all-groups` to regenerate `backend/uv.lock` pinning `mistralai==2.9.4` plus its transitive deps (`eval-type-backport`, `jsonpath-python`, `opentelemetry-api`, `opentelemetry-semantic-conventions`, `python-dateutil`, `six`, `typing-inspection`).
+
+### Live smoke verification (real Mistral + NVIDIA)
+
+`backend/scripts/smoke_copilot_live.py` drives the happy path + the denial path against the local pgvector container + the real provider endpoints:
+
+| Step | Result |
+|---|---|
+| `POST /api/v1/auth/register` (smoke user) | 201, user_id returned |
+| `POST /api/v1/auth/login` | 200, JWT (209 bytes) + refresh (64 bytes) |
+| `POST /api/v1/channels/group` | 201, channel_id returned |
+| `POST /api/v1/channels/{id}/messages` × 3 (Spanish) | 201 × 3 — each message is embedded by Mistral on insert |
+| `POST /api/v1/copilot/query` Spanish-language question | 200 in ~18 s — Mistral embed + HNSW top-3 + NVIDIA NIM chat, citations=[3 msg_ids], denial_code=null, confidence=high |
+| `GET /api/v1/copilot/usage` | 200, `total_calls=1, prompt_tokens=~883, completion_tokens=~175, cost_usd=0.0` — the §11.4 audit row is on disk |
+| `POST /api/v1/auth/register` + `…/login` (outsider) + `POST /api/v1/copilot/query` | 200, `denial_code=deny:no-permission`, `citations=[]`, `confidence=low` — the RLS-gated retrieval gave zero rows, the use case classified it correctly |
+
+Adapters smoke tests (`tests/infrastructure/ai/test_smoke.py`, gated by `RUN_AI_SMOKE=1`) pass against the live Mistral + NVIDIA endpoints:
+
+- `test_mistral_embed_smoke` — `mistral-embed` returns 2 vectors of length 1024, not all-zeros.
+- `test_nvidia_chat_smoke` — `mistralai/mistral-nemotron` returns an assistant text + token counts.
+
+### Full test suite status
+
+108 passed, 2 skipped (the 2 smoke tests, which need `RUN_AI_SMOKE=1` + the API keys), 0 failures. Includes the 4 BDD copilot scenarios (A: non-member → `deny:no-permission`; B: member sees own messages → high confidence; C: safe-comply → `infer:low-confidence` with the literal `"Inferred with incomplete context: Confidence LOW"` marker; D: audit trail).
+
+### Decisions worth flagging in review
+
+1. **`use_shared=True` is the right contract for the fake chat provider.** Previously, BDD step defs mutated a module-level `_next_response` and the test app's chatter read it implicitly. The split into `use_shared=True` (BDD / cross-step) vs per-instance `_response` (dev mode / unit) is more disciplined — the dev mode default gives a "rich answer" so the Playwright panel renders citations without setup, and BDD tests opt in to shared state when they need to model mid-scenario pushback.
+
+2. **The `main.py` `if/elif/elif` → `else: { if; if; }` refactor is the minimum change.** A more aggressive cleanup would be to invert the dependency: always require the caller to pass both ports, and let `create_app` raise if either is missing. That would also let us drop the `_UnconfiguredEmbeddingProvider` / `_UnconfiguredChatProvider` stub classes entirely. Deferred to Phase 7 cleanup.
+
+3. **Phase 7 risks from the prior block still apply.** No rate-limit, no streaming, `rw_copilot_usage` has no RLS policy, cost hardcoded. None of these are regressions — they're explicitly listed as Phase 7 work and the user signalled "we can't ship Phase 7".
+
+### File map (changes in this finish-up)
+
+```
+backend/app/main.py                       # fix: chatter build independent of embedder build
+backend/uv.lock                           # chore: regenerate lockfile to pin mistralai
+backend/tests/conftest.py                 # fix: chatter=FakeChatProvider(use_shared=True)
+backend/tests/step_defs/test_copilot.py   # fix: push_back uses set_response() API
+backend/scripts/smoke_copilot_live.py     # NEW — live e2e verification harness
+docs/DECISIONS.md                         # this entry
+```
+
+
