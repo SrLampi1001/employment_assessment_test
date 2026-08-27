@@ -92,6 +92,40 @@ class MessageEdit:
     rw_editor_id: UUID
 
 
+# ─── Phase 5: search entity ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    """One row from `rw_search_messages(...)`. The `rw_highlight`
+    field is the original `rw_body` with `<mark>…</mark>` around the
+    matching tokens (the locale is the actor's `rw_locale` from the DB).
+
+    The frontend renders this verbatim — escaping happens in the
+    client because we control both sides of the wire and React
+    already escapes text by default. `<mark>` is a harmless HTML tag.
+    """
+
+    rw_id: UUID
+    rw_channel_id: UUID
+    rw_author_id: UUID
+    rw_body: str
+    rw_created_at: datetime
+    rw_highlight: str
+
+
+# ─── Phase 5: per-channel read-state view ────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ChannelReadState:
+    """Snapshot of a channel from the perspective of the actor."""
+
+    channel: Channel
+    membership: ChannelMember
+    unread_count: int
+
+
 # ─── Ports ───────────────────────────────────────────────────────────────
 
 
@@ -163,6 +197,13 @@ class ChannelRepository(Protocol):
         """Thin wrapper around `rw_create_channel(...)`. Returns the new
         channel id. The DB function inserts the channel + the creator's
         owner membership in one statement (Phase 1, 0040)."""
+        ...
+
+    def list_visible_with_unread(self) -> list[tuple[Channel, ChannelMember, int]]:
+        """Phase 5: same as `list_visible` but each row carries the
+        actor's unread count for that channel. Backs the channel list
+        in the UI so the unread badge can render without an extra
+        round-trip per channel."""
         ...
 
 
@@ -246,6 +287,38 @@ class MessageRepository(Protocol):
         """Inserts a `(message_id, user_id)` row into `rw_message_read`
         if absent (the table has a UNIQUE constraint that makes this
         safe to retry). Returns True on insert."""
+        ...
+
+    def unread_count_for_channel(
+        self, *, channel_id: UUID, user_id: UUID
+    ) -> int:
+        """Phase 5: count visible (non-logically-deleted) messages in
+        this channel that the user has NOT marked read. Returns 0
+        for non-members."""
+        ...
+
+    def mark_channel_read(self, *, channel_id: UUID, user_id: UUID) -> int:
+        """Phase 5: bulk insert `rw_message_read` for every visible
+        message that isn't already marked. Idempotent (UNIQUE on
+        `(rw_message_id, rw_user_id)`). Returns the number of rows
+        actually inserted (0 on a no-op call)."""
+        ...
+
+
+class SearchRepository(Protocol):
+    """Phase 5: lexical search across `rw_message` with highlight.
+
+    Locale comes from the actor's `rw_user.rw_locale` inside the DB
+    function — the application does not pass it. RLS is bypassed
+    inside the SECURITY DEFINER function but membership is re-checked
+    explicitly, so a non-member gets zero rows by construction.
+    """
+
+    def search_in_channel(
+        self, *, channel_id: UUID, query: str, limit: int
+    ) -> list[SearchHit]:
+        """`ts_headline(rw_locale, rw_body, plainto_tsquery(rw_locale, query))`
+        with `<mark>` tags around matches. Returns newest-first."""
         ...
 
 
