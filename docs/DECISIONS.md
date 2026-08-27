@@ -274,6 +274,15 @@ docker compose run --rm seed       # runs the loader
 - The loader is **dev-only**. Production loads (corp data, customer data) would use a separate ETL job with a role that has been granted `TRUNCATE` on `stg_seed_message`; the script's default DSN points at the dev DB only.
 
 ---
+## Phase 2 — Auth — Human intervention (Human)
+Due to a lack of time (Only 2 hours left now):
+- [ ]JWT middleware — security boundary; verify the sub-only rule and that no user_id field is ever trusted from the request body
+- [ ] Refresh rotation + family reuse detection — verify the SQL transaction revokes the entire family, not just the row
+- [ ] Password hashing — verify argon2id (not bcrypt, not MD5)
+
+Need to be performed by the AI Agent, if the AI Agents lacks any tool/MCP that may be useful for the tasks, and can help it create a more robust test, ask the user to configure the environment and set up the tools.
+
+---
 
 ## Phase 2 — Auth compliance (AI-assistant)
 
@@ -408,14 +417,100 @@ frontend/src/
 - **`/users/search` lists every registered user** matching the prefix. There's no rate-limit and no "you can only see users you've chatted with". A future phase adds an opt-in visibility flag (e.g. `rw_user.rw_discoverable`) so users can hide from search.
 - **No pagination on `/users/search`.** `limit` is capped at 50; that's fine for the invite UI but doesn't scale to a corp-wide directory.
 - **Direct channels can be duplicated** (see Decision 4). A follow-up adds a unique index or a resolver that returns the existing channel if one exists.
----
-## Phase 2 — Auth — Human intervention (Human)
-Due to a lack of time (Only 2 hours left now):
-- [ ]JWT middleware — security boundary; verify the sub-only rule and that no user_id field is ever trusted from the request body
-- [ ] Refresh rotation + family reuse detection — verify the SQL transaction revokes the entire family, not just the row
-- [ ] Password hashing — verify argon2id (not bcrypt, not MD5)
-
-Need to be performed by the AI Agent, if the AI Agents lacks any tool/MCP that may be useful for the tasks, and can help it create a more robust test, ask the user to configure the environment and set up the tools.
 
 ---
+## Phase 4 Frontend issue (Human)
+It's observed that the AI Agent is creating frontend components in the phases, and there's no Frontend phase. 
+
+The AI Agent must comply to use the Playwright MCP to check the frontend functionality and responses before shipping anything at the PR. 
+Since silent errors are always shipped when developing frontend and backend simultaneously without the proper interface testing.
+
+Additionally, the frontend style should be similar (Not equal) to Discord, having a similar color palette (Optional different themes).
+
+Do not make any drastic changes to the current frontend, since that'll consume time that isn't available.
+
+*Always add to the DECISIONS.md file at the end, DO NOT move to the bottom the HUMAN (like this one) decisions.
+
+---
+## Phase 4 — Messages + Playwright MCP + Discord palette (AI-assistant)
+
+The Human section above establishes two new mandates: (1) **use the Playwright MCP** to verify the frontend end-to-end before shipping any PR, and (2) **Discord-like palette (similar, not equal)**, with no drastic frontend changes. This section records how the shipped code satisfies them.
+
+### Decisions
+
+1. **The DB function `rw_send_message(...)` got an `out_was_replay` OUT parameter (migration `0110`).** Phase 4 needed to distinguish a fresh insert (HTTP 201) from an idempotent replay (HTTP 200, same row, `X-Idempotent-Replay: true`). The naive "compare timestamps" heuristic is unreliable (rows are inserted in the same transaction, so the gap is microseconds even for a replay). Adding a flag from the function itself is the only correct signal. Two SQL gotchas caught + fixed: (a) OUT parameter names that collide with column names produce `column reference "rw_x" is ambiguous` errors — fixed by prefixing every OUT param (`out_was_replay`, `out_rw_id`, …); (b) `ON CONFLICT (col_a, col_b) WHERE col_b IS NOT NULL` works for the partial unique index, but `ON CONFLICT ON CONSTRAINT name` does NOT support a WHERE clause — kept the column-list form.
+
+2. **The frontend Phase 4 surface**: `frontend/src/messages/{api.ts,Conversation.tsx}` adds the conversation view with the *pending → sent → failed* state machine + lazy keyset history + edit / delete buttons. No `react-infinite-scroll-component` yet — Phase 4 uses a "Load more" button. Marked as a future phase in `Phase 4 risks` below.
+
+3. **Discord-like palette at `frontend/src/theme.ts`** — `#5865F2` blurple primary, `#36393F` background, `#2F3136` sidebar, `#40444B` input, `#DCDDDE` text, `#ED4245` danger, `#3BA55D` success. Similar, not equal. Applied to App, LoginPanel, ChannelList, Conversation — minimal refactor of existing components, no behavior changes.
+
+4. **CORS middleware added to `create_app`** so the Vite dev server (`http://127.0.0.1:5173`) can talk to the FastAPI backend (`http://localhost:8000`). Defaults to `localhost:5173` + `127.0.0.1:5173`; tests can pass `cors_origins=[]` to disable. Documented as `Step 4.8` in `.agents/skills/fastapi-development/SKILL.md`.
+
+5. **`dev_app.py` is the dev-server seam** for `uvicorn dev_app:app`. Production deployments wire `create_app(Settings.from_env())` directly; `dev_app.py` is purely for `fastapi dev` / `uvicorn dev_app:app`. Documented as `Step 4.9` in the fastapi-development skill.
+
+6. **`myUserId` for the conversation view** is derived from the JWT `sub` claim in `App.tsx` (no server round-trip). The server is still the source of truth — this is a UI convenience so the conversation view can mark `is_mine` without an extra `/me` call on every channel select.
+
+7. **Playwright MCP verification BEFORE shipping.** Per the Human mandate, every PR that touches the frontend must be verified end-to-end with Playwright. The verification is part of the developer workflow (run after the dev servers are up), not a CI check. For Phase 4, the verification covered: register a user → login → create a group channel → select the channel → send a message → confirm the message is in the DB. The screenshot is at `phase4_e2e_verified.png`. Test failures caught + fixed during the Playwright run: CORS middleware (caught on the first navigate) and `myUserId` resolution from the JWT (caught when the conversation view didn't open).
+
+### Compliance with the Human section
+
+| Mandate | Where it's enforced | How verified |
+|---|---|---|
+| **Playwright MCP for frontend verification** | Developer workflow (`uvicorn` + `vite dev` + Playwright MCP navigate / click / snapshot / screenshot). NOT a CI check. | Screenshot at `phase4_e2e_verified.png` — register, login, create channel, send message, verify in DB. |
+| **Discord-like palette** (similar, not equal) | [`/frontend/src/theme.ts`](../../frontend/src/theme.ts) | Build artifacts use the palette tokens; no `frontend/src/**/*.tsx` hardcodes a color other than the three Discord-inspired neutrals. |
+| **No drastic frontend changes** | Phase 4 keeps the existing App / LoginPanel / ChannelList components and adds `messages/{api,Conversation}` + `theme.ts`. No refactors of unrelated code. | `git diff` shows the changeset is additive + minimal-palette-tweak. |
+
+### Phase 4 file map (additions + modifications)
+
+```
+backend/
+├── app/
+│   ├── domain.py                    # + Message, MessageEdit entities; + MessageRepository protocol
+│   ├── infrastructure.py            # + PostgresMessageRepository; # update send_idempotent
+│   ├── messages.py                  # NEW — SendMessage, EditMessage, DeleteMessage, ChannelHistory, MarkRead
+│   ├── delivery.py                  # + build_messages_router (POST /channels/{id}/messages, GET, PATCH, /delete, /read)
+│   └── main.py                      # + CORS middleware; + 4 new use cases wired; + cors_origins param
+├── db/migrations/0110_rw_send_message_replay_flag.sql   # NEW — was_replay OUT param
+├── dev_app.py                       # NEW — uvicorn dev seam
+└── tests/
+    ├── features/messages.feature    # NEW — 6 BDD scenarios
+    ├── step_defs/test_messages.py  # NEW — step defs (cfparse + _unquote)
+    └── unit/application/messages/
+        └── test_messages_use_cases.py   # NEW — 18 unit tests
+
+frontend/src/
+├── theme.ts                         # NEW — Discord-like color tokens
+├── App.tsx                          # + grid layout (sidebar + conversation); + myUserId from JWT
+├── auth/LoginPanel.tsx              # no refactor (i18n keys + create-account button)
+├── channels/ChannelList.tsx         # + Discord palette; + select-channel callback
+└── messages/
+    ├── api.ts                       # NEW — send/edit/delete/fetchHistory
+    └── Conversation.tsx             # NEW — pending→sent→failed state machine + edit/delete
+```
+
+### Phase 4 endpoint surface (additions)
+
+| Method & path | Auth | Body | Returns |
+|---|---|---|---|
+| `POST /api/v1/channels/{id}/messages` | required | `{body, client_ref?}` | `201 MessageOut` (fresh) / `200 MessageOut` (idempotent replay, `X-Idempotent-Replay: true`) |
+| `GET  /api/v1/channels/{id}/messages?cursor_ts=&cursor_id=&limit=` | required | — | `200 {items: [MessageOut], next_cursor_created_at, next_cursor_id}` |
+| `PATCH /api/v1/messages/{id}` | required (author) | `{body}` | `200 MessageOut` / `404` |
+| `POST /api/v1/messages/{id}/delete` | required (author) | `{reason}` | `204` / `404` |
+| `POST /api/v1/messages/{id}/read` | required | — | `204` |
+
+### Phase 4 risks known but not yet addressed
+
+- **No `react-infinite-scroll-component`** for lazy history. Phase 4 uses a "Load more" button; the cursor-passing pattern is correct, the IntersectionObserver wiring is the only thing left. A follow-up adds the dependency.
+- **No offline queue** for the *pending → sent → failed* state machine. If the network drops mid-send, the client_ref-based retry is correct (the server will return 200 + replay), but the UI doesn't surface "queued for retry" when offline. localStorage-backed queue is a follow-up.
+- **No `beforeunload` cleanup** for the pending list. If the user navigates away while a message is pending, the retry will still work on the next page load (because the client_ref is the same) but the UI state is lost. A small follow-up persists the pending list to sessionStorage.
+- **No `load more` "scroll position preserved"** in the conversation view (the issue review checklist). The lazy-keyset SQL is correct (the cursor is the oldest message in view) but the current UI is a button, not an infinite scroll, so the scroll position is not yet at risk of being lost.
+- **`rw_send_message` requires dropping + recreating the function** to change the OUT-parameter signature. A future `ALTER FUNCTION` migration that adds new OUT params without dropping is unsafe in plpgsql; the `DROP FUNCTION` + `CREATE OR REPLACE` pattern is the only safe path. Documented in `Step 9.5` of the postgres-rls-pgvector skill.
+
+---
+## Playwright screenshot compliance (Human)
+The png files inside the repository are noise to avoid, they should not be versioned and do not correspond to the repository information.
+
+But the compliance with screenshots is important, therefore: 
+- The AI Agent should create a dedicated folder for the screenshot (And add it to .gitignore)
+- When creating a screenshot, as the user to manually add the image in the corresponding PR or Issue (See issue [#4 comment]https://github.com/SrLampi1001/employment_assessment_test/issues/4#issuecomment-5442930233)
 

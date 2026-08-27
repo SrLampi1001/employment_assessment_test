@@ -25,6 +25,7 @@ from uuid import UUID
 
 import jwt
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .auth import AuthError, Login, Refresh, RegisterUser
@@ -45,6 +46,14 @@ from .domain import (
     SessionFactory,
     User,
     UserRepository,
+)
+from .messages import (
+    ChannelHistory,
+    DeleteMessage,
+    EditMessage,
+    MarkRead,
+    MessageError,
+    SendMessage,
 )
 
 
@@ -478,8 +487,235 @@ _STATUS_MAP = {
     "self-direct": status.HTTP_400_BAD_REQUEST,
     "not-owner": status.HTTP_403_FORBIDDEN,
     "already-member": status.HTTP_409_CONFLICT,
+    # ── Phase 4 message codes ──────────────────────────────────────────
+    "invalid-body": status.HTTP_400_BAD_REQUEST,
+    "invalid-client-ref": status.HTTP_400_BAD_REQUEST,
+    "invalid-reason": status.HTTP_400_BAD_REQUEST,
+    "invalid-limit": status.HTTP_400_BAD_REQUEST,
+    "message-not-found": status.HTTP_404_NOT_FOUND,
+    "not-author": status.HTTP_403_FORBIDDEN,
+    "idempotent-replay": status.HTTP_200_OK,
 }
 
 
 def _status_for(code: str) -> int:
     return _STATUS_MAP.get(code, status.HTTP_400_BAD_REQUEST)
+
+
+# ─── Messages endpoints ─────────────────────────────────────────────────
+
+
+class SendMessageIn(BaseModel):
+    body: str = Field(min_length=1, max_length=8000)
+    client_ref: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class MessageOut(BaseModel):
+    rw_id: UUID
+    rw_channel_id: UUID
+    rw_author_id: UUID
+    rw_body: str
+    rw_is_edited: bool
+    rw_created_at: datetime
+    rw_edited_at: datetime | None
+    is_mine: bool
+
+
+class HistoryOut(BaseModel):
+    items: list[MessageOut]
+    next_cursor_created_at: datetime | None
+    next_cursor_id: UUID | None
+
+
+class EditMessageIn(BaseModel):
+    body: str = Field(min_length=1, max_length=8000)
+
+
+class DeleteMessageIn(BaseModel):
+    reason: str = Field(default="user-deleted", min_length=1, max_length=500)
+
+
+def build_messages_router(
+    *,
+    send_message: SendMessage,
+    edit_message: EditMessage,
+    delete_message: DeleteMessage,
+    channel_history: ChannelHistory,
+    mark_read: MarkRead,
+    session_factory,
+    message_repo_factory,
+) -> APIRouter:
+    """Routes for `/api/v1/channels/{id}/messages` + `/api/v1/messages/{id}`.
+
+    Authorization:
+    - All routes require a JWT (Depends(get_current_actor)).
+    - `actor_id` comes from `request.state.actor_id` (Phase 2 sub-only rule).
+    - The DB function `rw_send_message(...)` and procedures
+      `rw_edit_message(...)` / `rw_delete_message(...)` re-check the
+      GUC actor and channel membership as defense in depth — even
+      with a valid JWT, a non-member cannot insert / edit / delete
+      messages in a channel they cannot see.
+    """
+    from .infrastructure import RwSession, PostgresMessageRepository
+
+    router = APIRouter(prefix="/api/v1", tags=["messages"])
+
+    @router.post(
+        "/channels/{channel_id}/messages",
+        status_code=201,
+        response_model=MessageOut,
+    )
+    async def send(
+        channel_id: UUID,
+        payload: SendMessageIn,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ):
+        try:
+            msg, replay = send_message(
+                actor_id=actor,
+                channel_id=channel_id,
+                body=payload.body,
+                client_ref=payload.client_ref,
+            )
+        except MessageError as e:
+            raise HTTPException(
+                status_code=_status_for(e.code), detail=e.message
+            ) from None
+        out = MessageOut(
+            rw_id=msg.rw_id,
+            rw_channel_id=msg.rw_channel_id,
+            rw_author_id=msg.rw_author_id,
+            rw_body=msg.rw_body,
+            rw_is_edited=msg.rw_is_edited,
+            rw_created_at=msg.rw_created_at,
+            rw_edited_at=msg.rw_edited_at,
+            is_mine=msg.is_mine,
+        )
+        if replay:
+            # Idempotent replay: return 200 (not 201) with the
+            # X-Idempotent-Replay header so the frontend can detect
+            # the replay without a special body field.
+            response = JSONResponse(
+                content=out.model_dump(mode="json"),
+                status_code=200,
+            )
+            response.headers["X-Idempotent-Replay"] = "true"
+            return response
+        return out
+
+    @router.get(
+        "/channels/{channel_id}/messages", response_model=HistoryOut
+    )
+    async def history(
+        channel_id: UUID,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+        cursor_ts: Annotated[datetime | None, Query()] = None,
+        cursor_id: Annotated[UUID | None, Query()] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ) -> HistoryOut:
+        before = (cursor_ts, cursor_id) if (cursor_ts and cursor_id) else None
+        try:
+            page = channel_history(
+                actor_id=actor,
+                channel_id=channel_id,
+                before=before,
+                limit=limit,
+            )
+        except MessageError as e:
+            raise HTTPException(
+                status_code=_status_for(e.code), detail=e.message
+            ) from None
+        return HistoryOut(
+            items=[
+                MessageOut(
+                    rw_id=m.rw_id,
+                    rw_channel_id=m.rw_channel_id,
+                    rw_author_id=m.rw_author_id,
+                    rw_body=m.rw_body,
+                    rw_is_edited=m.rw_is_edited,
+                    rw_created_at=m.rw_created_at,
+                    rw_edited_at=m.rw_edited_at,
+                    is_mine=m.is_mine,
+                )
+                for m in page.items
+            ],
+            next_cursor_created_at=(
+                page.next_cursor[0] if page.next_cursor else None
+            ),
+            next_cursor_id=page.next_cursor[1] if page.next_cursor else None,
+        )
+
+    @router.patch("/messages/{message_id}", response_model=MessageOut)
+    async def edit(
+        message_id: UUID,
+        payload: EditMessageIn,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ) -> MessageOut:
+        try:
+            ok = edit_message(
+                actor_id=actor,
+                message_id=message_id,
+                new_body=payload.body,
+            )
+        except MessageError as e:
+            raise HTTPException(
+                status_code=_status_for(e.code), detail=e.message
+            ) from None
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="message not found or not editable by this actor",
+            )
+        # Re-fetch the row (RLS-filtered) for the response. RLS may
+        # also hide it if the actor lost membership mid-request.
+        with RwSession(session_factory, actor_id=actor) as conn:
+            repo = message_repo_factory(conn)
+            updated = repo.find_visible(message_id, actor)
+        if updated is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="message not visible",
+            )
+        return MessageOut(
+            rw_id=updated.rw_id,
+            rw_channel_id=updated.rw_channel_id,
+            rw_author_id=updated.rw_author_id,
+            rw_body=updated.rw_body,
+            rw_is_edited=updated.rw_is_edited,
+            rw_created_at=updated.rw_created_at,
+            rw_edited_at=updated.rw_edited_at,
+            is_mine=updated.rw_author_id == actor,
+        )
+
+    @router.post("/messages/{message_id}/delete", status_code=204)
+    async def delete(
+        message_id: UUID,
+        payload: DeleteMessageIn,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ) -> None:
+        try:
+            ok = delete_message(
+                actor_id=actor,
+                message_id=message_id,
+                reason=payload.reason,
+            )
+        except MessageError as e:
+            raise HTTPException(
+                status_code=_status_for(e.code), detail=e.message
+            ) from None
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="message not found or already deleted",
+            )
+        return None
+
+    @router.post("/messages/{message_id}/read", status_code=204)
+    async def mark_message_read(
+        message_id: UUID,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ) -> None:
+        mark_read(actor_id=actor, message_id=message_id)
+        return None
+
+    return router

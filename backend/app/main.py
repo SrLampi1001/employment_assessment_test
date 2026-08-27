@@ -21,22 +21,34 @@ from .delivery import (
     build_auth_router,
     build_channels_router,
     build_me_router,
+    build_messages_router,
 )
 from .infrastructure import (
     Argon2idHasher,
     PostgresChannelMemberRepository,
     PostgresChannelRepository,
+    PostgresMessageRepository,
     PostgresRefreshTokenStore,
     PostgresUserRepository,
     PyJwtService,
     make_session_factory,
 )
+from .messages import (
+    ChannelHistory,
+    DeleteMessage,
+    EditMessage,
+    MarkRead,
+    SendMessage,
+)
+
+from fastapi.middleware.cors import CORSMiddleware
 
 
 def create_app(
     settings: Settings,
     *,
     session_factory: Any | None = None,
+    cors_origins: list[str] | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app.
 
@@ -46,8 +58,28 @@ def create_app(
             When None, a fresh-connection factory is built from
             `settings.database_url`. Tests pass a testcontainer-backed
             factory.
+        cors_origins: list of allowed CORS origins. Defaults to
+            `http://localhost:5173` (Vite dev server) so the
+            frontend can hit the API during local dev. In Phase 7
+            the production deployment sets the actual frontend
+            origin(s).
     """
     app = FastAPI(title="Riwi Co. Messaging Platform")
+
+    # CORS — the Vite dev server lives on a different origin. Phase 7
+    # locks this down to the production frontend origin.
+    origins = cors_origins or [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Idempotent-Replay"],
+    )
 
     jwt_service = PyJwtService(
         settings.jwt_secret,
@@ -101,6 +133,29 @@ def create_app(
         channel_member_repo_factory=PostgresChannelMemberRepository,
     )
 
+    # ── Phase 4 use cases (messages) ────────────────────────────────────
+    message_repo_factory = PostgresMessageRepository
+    send_message_uc = SendMessage(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+    )
+    edit_message_uc = EditMessage(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+    )
+    delete_message_uc = DeleteMessage(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+    )
+    channel_history_uc = ChannelHistory(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+    )
+    mark_read_uc = MarkRead(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+    )
+
     # ── Routers ─────────────────────────────────────────────────────────
     app.include_router(
         build_auth_router(
@@ -118,6 +173,17 @@ def create_app(
             leave_channel=leave_channel,
             user_repo_factory=PostgresUserRepository,
             session_factory=factory,
+        )
+    )
+    app.include_router(
+        build_messages_router(
+            send_message=send_message_uc,
+            edit_message=edit_message_uc,
+            delete_message=delete_message_uc,
+            channel_history=channel_history_uc,
+            mark_read=mark_read_uc,
+            session_factory=factory,
+            message_repo_factory=message_repo_factory,
         )
     )
 
