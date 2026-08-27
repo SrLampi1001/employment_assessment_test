@@ -29,4 +29,4 @@ dist/
 # Editor / OS
 .DS_Store
 Thumbs.db
-*.swp
+*.swp.playwright-mcp/
