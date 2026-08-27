@@ -102,6 +102,23 @@ RLS pattern from ARCHITECTURE §3. The actor is set transaction-local; the polic
 1. **`current_setting('app.current_user_id', true)` — note the `true` second argument.** It returns `NULL` (instead of erroring) when the GUC is unset. Cast `::uuid` then fails closed (returns zero rows) instead of failing open. This is the difference between a security model and a security incident. *Known edge case:* an explicitly set empty string (e.g. `set_config(..., NULL, false)` from a test) errors on the `::uuid` cast — still fail-closed (no leak) but ugly. Wrap in `NULLIF(setting, '')` if a cleaner error is needed.
 2. **Privileges for the app role.** [`/db/migrations/0080_grants.sql`](../../db/migrations/0080_grants.sql) issues the standard `GRANT SELECT, INSERT, UPDATE, DELETE ON rw_* TO rw_app` + `GRANT EXECUTE ON FUNCTION/PROCEDURE ...` — RLS is the *row-level* filter; standard `GRANT` is still needed at the table level. The default-deny policy applies if RLS is enabled with no matching `FOR SELECT` policy.
 
+### Step 4.5: Channel-scoped RLS — Phase 3 pattern
+
+The `rw_channel_member` policy is intentionally narrow — the actor can only see / insert / update **their own** membership rows (`rw_user_id = GUC`). That lets the actor:
+
+- See their own role in a channel.
+- `UPDATE` their own `rw_left_at` for the leave flow.
+- `INSERT` a membership row for themselves (re-join after leaving).
+
+But it **forbids** adding a *different* user as a member, so the "channel owner invites someone else" flow needs a SECURITY DEFINER function. See [`/db/migrations/0100_rw_add_channel_member.sql`](../../../db/migrations/0100_rw_add_channel_member.sql) for the shipped pattern. The function body enforces:
+
+1. The GUC actor matches the inviter (`rw_add_channel_member: inviter mismatch with actor GUC`).
+2. The inviter is the channel creator (`rw_created_by = p_inviter_id`).
+3. The new member is not already an active member (`rw_left_at IS NULL`).
+4. Re-joins NULL the prior `rw_left_at` instead of inserting a duplicate — the `uq_rw_channel_member_active` partial unique index (`Step 4` referenced it) would reject a duplicate active row anyway.
+
+`rw_create_channel` (Phase 1, 0040) inserts the channel + the creator's `owner` membership in one statement. `ListVisibleChannels` at the use case level is a plain `SELECT FROM rw_channel JOIN rw_channel_member` — the join to `rw_channel_member` is RLS-filtered to the actor's own rows, so each channel row gets at most one matching membership row (the actor's own). No `EXISTS` filter needed at the application layer.
+
 ## Step 5: Transactional functions and procedures
 
 The write path goes through DB functions/procedures, not raw application SQL (ARCHITECTURE §3 + §5.1).

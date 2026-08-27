@@ -201,13 +201,14 @@ Cursor is opaque to the client; serialize as `{"created_at": ..., "id": ...}` an
 
 The write path goes through transactional DB functions/procedures, not raw SQL in the application:
 
-- `rw_register_user(...)` — creates `rw_user` + `rw_auth_credential` atomically.
-- `rw_create_channel(...)` — creates channel + first member (creator as `owner`).
-- `rw_send_message(...)` — inserts message; trigger fills `rw_embedding`.
-- `rw_edit_message(...)` — appends `rw_message_edit`, updates body.
-- `rw_delete_message(...)` — logical delete (`rw_deleted_at`, `rw_deleted_reason`).
+- `rw_register_user(...)` — creates `rw_user` + `rw_auth_credential` atomically (Phase 1, 0040).
+- `rw_create_channel(...)` — creates channel + first member (creator as `owner`) (Phase 1, 0040).
+- `rw_add_channel_member(...)` — channel owner-only invite; SECURITY DEFINER (Phase 3, 0100). The `rw_channel_member` RLS policy (`rw_user_id = GUC`) lets the actor only see / modify their own membership rows, so adding a *different* user requires the function.
+- `rw_send_message(...)` — inserts message; trigger fills `rw_embedding` (Phase 4).
+- `rw_edit_message(...)` — appends `rw_message_edit`, updates body (Phase 4).
+- `rw_delete_message(...)` — logical delete (`rw_deleted_at`, `rw_deleted_reason`) (Phase 4).
 
-The application layer's job is input validation and dispatch — **business rules live in the database**. This is the "thin use cases" rule from `ARCHITECTURE.md §5.1`.
+See [`/backend/db/migrations/0100_rw_add_channel_member.sql`](../../db/migrations/0100_rw_add_channel_member.sql) for the Phase 3 pattern (SECURITY DEFINER + defense-in-depth actor + membership checks). The application layer's job is input validation and dispatch — **business rules live in the database**. This is the "thin use cases" rule from `ARCHITECTURE.md §5.1`.
 
 ## Step 5: Testing — BDD against real PostgreSQL
 
