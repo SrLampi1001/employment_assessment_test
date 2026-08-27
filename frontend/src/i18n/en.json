@@ -1,0 +1,69 @@
+{
+  "app": {
+    "title": "Riwi Co. — Internal Messaging"
+  },
+  "auth": {
+    "login": "Sign in",
+    "username": "Username",
+    "password": "Password",
+    "submit": "Enter",
+    "logout": "Sign out",
+    "logged_in_as": "Signed in as {{name}}",
+    "invalid_credentials": "Invalid username or password",
+    "create_account": "Create account",
+    "back_to_sign_in": "Back to sign in"
+  },
+  "channels": {
+    "title": "Conversations",
+    "empty": "No conversations yet",
+    "new_group": "New group",
+    "new_direct": "Direct message",
+    "create": "Create",
+    "name": "Name",
+    "other_username": "Username to chat with",
+    "cancel": "Cancel",
+    "leave": "Leave",
+    "owner_badge": "Owner",
+    "member_badge": "Member",
+    "unread_badge": "{{count}} new"
+  },
+  "messages": {
+    "title": "Messages",
+    "select_channel": "Select a conversation",
+    "placeholder": "Write a message…",
+    "send": "Send",
+    "sending": "Sending…",
+    "failed": "Failed to send. Retry?",
+    "retry": "Retry",
+    "edit": "Edit",
+    "save": "Save",
+    "cancel_edit": "Cancel",
+    "delete": "Delete",
+    "deleted": "(message deleted)",
+    "edited_suffix": "(edited)",
+    "load_more": "Load more",
+    "loading": "Loading…",
+    "empty_channel": "No messages yet",
+    "search_placeholder": "Search in this conversation…",
+    "search_button": "Search",
+    "search_no_results": "No matches",
+    "search_results_title": "{{count}} match",
+    "search_results_title_plural": "{{count}} matches",
+    "search_clear": "Clear",
+    "search_loading": "Searching…"
+  },
+  "copilot": {
+    "title": "AI Copilot",
+    "empty": "Ask anything about your visible messages.",
+    "placeholder": "Ask the copilot…",
+    "ask": "Ask",
+    "thinking": "Thinking…",
+    "error": "Error",
+    "deny_no_permission": "You do not have access to messages about this topic.",
+    "deny_out_of_scope": "That question is outside the scope of this assistant.",
+    "deny_insufficient_context": "Your visible history does not contain that. Try a different question.",
+    "infer_low_confidence": "Inferred with incomplete context. Confidence LOW.",
+    "prompt_version": "prompt v{{v}}",
+    "confidence_label": "confidence: {{c}}"
+  }
+}

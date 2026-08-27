@@ -37,6 +37,13 @@ gitGraph
   - Require **Human approval** before merge and **passing CI checks**.
   - All branches, expect release branches, are merged via squash merge and deleted.
   - Release branches target main.
+  - **PR workflow mode** (this project is **feature-oriented**, not single-commit):
+    - **Branch**: create a feature branch from `develop`.
+    - **Commits per feature**: multiple commits inside the branch — one per logical unit (`feat:` for code, `test:` for tests, `fix:` for bugfix, `chore:` for maintenance). Don't squash commits *into* the branch; squash happens at merge time.
+    - **Push**: push the branch to `origin`.
+    - **PR**: open the PR against `develop`, fill the template (or rationale + summary if no template), request review.
+    - **Merge**: squash-merge once approved + green CI. The branch is auto-deleted; the squash commit preserves the full commit history on `develop`'s log.
+  - **What this implies for AI agents**: don't try to cram code + test + bugfix into one commit, and don't open a PR with a single "wip" commit. Make small, named commits inside the feature branch and let reviewers follow the work.
 
 ---
 
@@ -120,12 +127,105 @@ Use **[Conventional Commits](https://www.conventionalcommits.org/)**.
 
 ---
 
+## Python Development Environment
+
+The Python toolchain must be **isolated and reproducible**. AI agents and human contributors (including grading reviewers in a fresh sandbox) should be able to clone the repo, run one command, and get a working environment with the exact pinned dependencies — no surprises, no system-level `pip install`.
+
+- **Use a virtual environment.** All Python work happens inside a project-local `.venv/` (or `.venv3.13/`). System Python is never used directly.
+- **`.venv/` is gitignored.** A leaked virtualenv is larger than the project itself and breaks reproducibility (it pins to an OS / Python build).
+- **Pin Python.** The project targets **Python 3.13**. `.python-version` (or `pyproject.toml`'s `requires-python = "==3.13.*"`) records the floor so any developer — or CI runner — picks the right interpreter.
+- **Dependency manager:** `uv` is preferred (fast, lockfile-driven, ships its own Python). `pip-tools` is acceptable as a fallback if `uv` is unavailable.
+- **Lockfile is committed.** `uv.lock` (or `requirements.lock`) is the source of truth for transitive pins. The bare `pyproject.toml` / `requirements.txt` declares direct dependencies; the lockfile fixes their versions.
+- **Reproducibility check:** the project must boot on a clean machine from `uv sync` (or `pip install -r requirements.lock`) alone — no manual steps, no `apt-get install`, no global `pip install`.
+
+Forbidden:
+
+- `pip install <package>` against system Python.
+- Committing `.venv/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`.
+- Hand-editing a lockfile (let the tool regenerate it).
+- Adding a runtime dependency without updating `pyproject.toml` AND the lockfile in the same commit.
+
+---
+
+## Skill Maintenance
+
+Skills under `.agents/skills/` are **AI-agent guardrails**, not the project's source of truth — `ARCHITECTURE.md` is. When real code is shipped that fulfills an example in a skill, the skill must be updated so it does not drift away from reality.
+
+### What to keep vs. replace
+
+| Code in a skill | Treatment |
+|---|---|
+| Descriptive patterns (`function send_message(...)`, generic idiomatic snippets, layer-diagram code) | **Keep.** These teach the AI the *shape* of correct code. They may go slightly stale on syntax details; that's acceptable. |
+| Feature-specific code that mirrors shipped functionality (`@router.post("/channels/{id}/messages")` if `/backend/app/delivery/http/messages.py` already has the real handler) | **Replace with a reference** to the actual file and a one-line summary of what it does. The skill should not contain a second copy of the truth. |
+| Version snapshots (table rows that pin versions) | **Keep**, but mark the date and verify against the project's `pyproject.toml` / `package.json` in PR review. If a pin drifts, open a follow-up. |
+
+### When code ships
+
+Every PR that introduces or moves a feature file **MUST** be followed (in the same PR or in an immediate `chore:` follow-up PR) by:
+
+1. A scan of `.agents/skills/*/SKILL.md` and `references/*.md` for predictive code blocks that now duplicate the shipped file.
+2. A replacement of those blocks with a `See /path/to/actual/file.py` reference plus a one-line summary of what the file does.
+3. A bump of `PROMPT_VERSION` if the change is inside the AI provider's system prompt (so the audit row can bisect).
+
+The follow-up commit uses a `chore(skills):` prefix and is **feature-branch-scoped**, not a global rewrite — only the skill files touched by the original feature get the reference replacement.
+
+### Why this matters
+
+The alternative is the skill becoming a "second source of truth" that contradicts the code. Once the has read both, it can't tell which one to follow — and it will pick the one that fits its training-data priors, which is usually the wrong one. The first time this drifts, it becomes a permanent habit.
+
+---
+
+## Playwright screenshots (per `docs/DECISIONS.md` — Human)
+
+**The agent verifies the frontend end-to-end with the Playwright MCP before any PR that touches the UI**, but the resulting PNGs are **noise in the repo** and must never be committed. Per the Human section in `docs/DECISIONS.md`:
+
+1. Save screenshots to `./.playwright-screenshots/` (already in `.gitignore`).
+2. Reference the screenshot path in the PR description so a human reviewer can drag-and-drop it into the PR / Issue conversation via the GitHub web UI.
+3. **Do NOT** commit the PNGs to the repo root or any other versioned directory.
+
+### Why the agent can't upload to GitHub directly
+
+Neither the GitHub MCP nor the `gh` CLI can upload binary attachments to issue / PR comments. The relevant surfaces:
+
+| Tool | Image upload? | Why not |
+|---|---|---|
+| `github_add_issue_comment` (MCP) | ❌ | Body is `text/markdown` only. |
+| `gh issue comment --body-file` | ❌ | Same — markdown body only. |
+| `gh api` / GitHub REST API | ❌ | `POST /repos/{owner}/{repo}/issues/{n}/comments` accepts `body` (markdown). Binary upload is **web-UI drag-and-drop only** (uploads to GitHub's own image host). |
+| GitHub web UI | ✅ | The only path that works. |
+
+### Workflow for every PR that touches the frontend
+
+```bash
+# 1. Start the dev stack (see AGENTS.md / Skill Maintenance or the dev_app.py docstring)
+./backend/.venv/bin/python -m uvicorn dev_app:app --host 0.0.0.0 --port 8000 &
+cd frontend && npm run dev &
+
+# 2. Use the Playwright MCP (playwright_browser_navigate / click / snapshot /
+#    take_screenshot) to drive the happy path.
+
+# 3. Save the PNG to the gitignored folder (the MCP tool's `filename` arg
+#    should point there, e.g. `./.playwright-screenshots/phase4_e2e_verified.png`).
+#    NEVER the repo root.
+
+# 4. In the PR description, link the screenshot path so the human reviewer
+#    can drag-and-drop it from disk into the PR conversation. Do NOT
+#    try to push the PNG to the issue via gh or the MCP.
+
+# 5. Commit a one-liner: "test(frontend): Playwright MCP e2e verified
+#    (screenshot in .playwright-screenshots/, see PR body)" — no binary.
+```
+
+---
+
 ## Checklist Before PR
 - [ ] Branch follows naming convention.
 - [ ] Commit messages are conventional.
 - [ ] Mermaid diagrams replace static images/text.
+- [ ] No PNGs / screenshots committed to the repo (Playwright artifacts live in `./.playwright-screenshots/`, gitignored).
 - [ ] No secrets in code (use `.env`).
 - [ ] Tests pass locally.
+- [ ] Playwright MCP verification ran end-to-end when the PR touches the frontend; the screenshot path is referenced in the PR body for human upload.
 - [ ] Documentation updated (if applicable).
 
 ---

@@ -1,0 +1,80 @@
+name: test
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: db_santiago_sanchez_nakamoto_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d riwi_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.13'
+          enable-cache: true
+
+      - name: Sync dependencies
+        working-directory: backend
+        run: uv sync
+
+      - name: Apply DB migrations (service db — for the verify-roles step)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for f in db/migrations/*.sql; do
+            echo "### Applying $f"
+            psql -h localhost -U postgres -d db_santiago_sanchez_nakamoto_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Verify roles (NOLOGIN, no BYPASSRLS)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d db_santiago_sanchez_nakamoto_test -tAc \
+            "SELECT rolname || ' | super=' || rolsuper || ' | bypassrls=' || rolbypassrls || ' | login=' || rolcanlogin FROM pg_roles WHERE rolname IN ('rw_app','rw_app_login','rw_migrator') ORDER BY rolname;"
+          echo "---"
+          echo "Expected (order-independent):"
+          echo "rw_app        | super=f | bypassrls=f | login=f"
+          echo "rw_app_login  | super=f | bypassrls=f | login=t"
+          echo "rw_migrator   | super=f | bypassrls=f | login=t"
+
+      - name: Run tests (BDD against pgvector testcontainer)
+        working-directory: backend
+        run: uv run pytest -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm install
+
+      - name: Type-check + build
+        working-directory: frontend
+        run: npm run build

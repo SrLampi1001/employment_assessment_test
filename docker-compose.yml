@@ -1,0 +1,47 @@
+# Phase 0 — local development stack.
+# Phase 0 only brings up the database. Backend + frontend services land in
+# Phase 2 (auth) and Phase 3 (channels) respectively.
+#
+# All ports and credentials are sourced from `.env` at the project root
+# (with `${VAR:-default}` fallbacks so the stack still boots if `.env`
+# is missing). See docs/DECISIONS.md "Phase 0 — No hardcoded ports".
+#
+# Run from the project root:
+#   docker compose up -d
+# Then verify:
+#   docker compose exec db psql -U postgres -d riwi -c "\dx"
+#   docker compose exec db psql -U postgres -d riwi -c "\du rw_app"
+#   docker compose exec db psql -U postgres -d riwi -tAc \
+#     "SELECT rolname || ' | super=' || rolsuper || ' | bypassrls=' || rolbypassrls \
+#      FROM pg_roles WHERE rolname IN ('rw_app','rw_app_login','rw_migrator') ORDER BY rolname;"
+
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    container_name: riwi-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-db_santiago_sanchez_nakamoto}
+    ports:
+      # ${POSTGRES_PORT:-5433}:5432 — internal PG port stays 5432 so
+      # `docker compose exec db psql ...` works exactly as documented;
+      # only the host-side mapping comes from .env.
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # PG18 stores data at /var/lib/postgresql/<version>/data internally;
+      # mount the named volume at /var/lib/postgresql so the entrypoint can
+      # lay out its own subdirectory (required by PG18+ for `pg_upgrade`
+      # compatibility — see docker-library/postgres#1259).
+      - db_data:/var/lib/postgresql
+      # Phase 0 init scripts — run on first start only.
+      - ./db/migrations/0001_extensions.sql:/docker-entrypoint-initdb.d/001_extensions.sql:ro
+      - ./db/migrations/0002_roles.sql:/docker-entrypoint-initdb.d/002_roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d riwi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:
