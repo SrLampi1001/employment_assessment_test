@@ -333,6 +333,81 @@ backend/tests/
 - **JWT secret rotation is not implemented.** Phase 2 ships one secret; Phase 3+ adds `kid` header + keyset if rotation is needed.
 - **No rate limiting on `/auth/login`.** Brute-force protection is Phase 7 (`ARCHITECTURE.md §11`).
 - **Refresh tokens have no reuse-detection lockout** (beyond the family revoke). An attacker who keeps replaying revoked tokens from a stolen batch will trigger one family revoke per attempt; Phase 7 adds account-level throttling.
+
+---
+
+## Phase 3 — Channels + Membership compliance (AI-assistant)
+
+The issue #5 review checklist has three security boundaries; this section records how the shipped code satisfies them.
+
+### Decisions
+
+1. **`rw_add_channel_member` is a SECURITY DEFINER function**, not a plain application-layer `INSERT`. The `rw_channel_member` RLS policy (`rw_user_id = GUC`) lets the actor only modify their own rows — which is correct, because it stops anyone from inserting a phantom membership. But the channel-owner-invites-others flow needs the actor to write a row for a *different* user. The Phase 3 migration `0100` solves this with a SECURITY DEFINER function that bypasses RLS and enforces the "inviter is owner" + "actor matches inviter" + "no duplicate active member" checks in its body. Pattern verified by the unit test `test_add_member_rejects_non_owner` + the BDD scenario `Invited member sees the channel in the visible-channels list`.
+
+2. **`ListVisibleChannels` is a plain `JOIN`, no `EXISTS` filter** at the application layer. The RLS policy on `rw_channel` filters to "channels I'm a member of", and the policy on `rw_channel_member` filters the join to "my own membership rows" — so each visible channel gets at most one matching membership row, the actor's own. The `my_role` column comes for free.
+
+3. **404 vs 403 on non-member reads.** Per `ARCHITECTURE.md §6`, missing-or-invisible resources return 404 so a non-member can't probe whether a channel exists. The `LeaveChannel` and `AddMember` use cases both call `channel_repo.find(...)` first; if the channel is invisible to the actor, `find` returns `None` (RLS filtered) and the use case raises `ChannelError("channel-not-found")` → HTTP 404. Asserted by the BDD scenario `Non-member gets 404 from any channel-scoped endpoint`.
+
+4. **Direct channels derive a canonical name** from the sorted pair of user UUIDs (`direct::{uuid_a}::{uuid_b}`). Phase 3 doesn't yet enforce uniqueness — repeated direct-channel creates between the same pair produce separate channels. A follow-up adds a unique index on the name pattern (or a join table) so the UI can resolve "direct channel with user X" deterministically.
+
+5. **The frontend Phase 3 surface is minimal**: i18n setup (`es.json` + `en.json` via `react-i18next`), a login/register panel, a channel list sidebar with create-group + create-direct + leave actions, a logout button. The conversation zone is **not** wired yet — that's Phase 4 (`SendMessage` + keyset history). The sidebar renders the actor's visible channels + role badge + leave button; new channels appear immediately on refresh.
+
+### Compliance with the issue #5 review checklist
+
+| Check | Where it's enforced | Test |
+|---|---|---|
+| **`rw_create_channel` path** — verify the creator is added as `owner` in the same statement | [`/backend/db/migrations/0040_functions_procedures.sql`](../../db/migrations/0040_functions_procedures.sql) `rw_create_channel(...)` inserts channel + creator's owner membership in one `BEGIN ... END` block | `tests/unit/application/channels/test_channels_use_cases.py::test_create_group_returns_channel_id_and_seed_creator_as_owner` + BDD `Creator sees the new channel` |
+| **`AddMember` use case** — verify only the channel owner can add members | [`/backend/db/migrations/0100_rw_add_channel_member.sql`](../../db/migrations/0100_rw_add_channel_member.sql) raises if `rw_created_by <> p_inviter_id`; the use case maps the error to `ChannelError("not-owner")` → HTTP 403 | `tests/unit/application/channels/test_channels_use_cases.py::test_add_member_rejects_non_owner` |
+| **404 vs 403 on non-member reads** — never 403 | [`/backend/app/channels.py`](../../backend/app/channels.py) `LeaveChannel.__call__` and `AddMember.__call__` both call `channel_repo.find(...)` first; invisible → `ChannelError("channel-not-found")` → HTTP 404 | BDD `Non-member gets 404 from any channel-scoped endpoint` |
+
+### Phase 3 file map
+
+```
+backend/app/
+├── channels.py                    # CreateChannel / AddMember / ListVisibleChannels / LeaveChannel + ChannelError + ChannelSummary
+├── delivery.py                    # + build_channels_router (/api/v1/channels/* + /api/v1/users/search)
+└── main.py                        # wires the four channel use cases + PostgresChannel/ChannelMember repos
+
+backend/db/migrations/
+└── 0100_rw_add_channel_member.sql # SECURITY DEFINER function for the owner-invites flow
+
+backend/tests/
+├── features/channels.feature          # 5 BDD scenarios
+├── step_defs/test_channels.py        # step definitions (cfparse + _unquote)
+└── unit/application/channels/        # 13 unit tests with in-memory fakes
+    └── test_channels_use_cases.py
+
+frontend/src/
+├── App.tsx                       # root — login OR channel sidebar
+├── i18n/
+│   ├── index.ts                  # i18next init (es.json + en.json)
+│   ├── es.json
+│   └── en.json
+├── auth/
+│   ├── api.ts                    # login, register, JWT storage
+│   └── LoginPanel.tsx
+└── channels/
+    ├── api.ts                    # list / create group / create direct / leave
+    └── ChannelList.tsx
+```
+
+### Phase 3 endpoint surface (additions)
+
+| Method & path | Auth | Body | Returns |
+|---|---|---|---|
+| `POST /api/v1/channels/group` | required | `{name}` | `201 {channel_id, name, kind=2, ...}` |
+| `POST /api/v1/channels/direct` | required | `{other_username}` | `201 {channel_id, ..., kind=1}` |
+| `GET  /api/v1/channels` | required | — | `200 {items: [ChannelOut]}` |
+| `DELETE /api/v1/channels/{id}` | required | — | `204` (leave) or `404` (not visible) |
+| `POST /api/v1/channels/{id}/members` | required (owner) | `{new_member_id, role?}` | `201 {channel_id, user_id, role}` |
+| `GET  /api/v1/users/search?q=&limit=` | required | — | `200 [User]` |
+
+### Phase 3 risks known but not yet addressed
+
+- **No member-count in the channel list response.** `GET /channels` returns `{items: [...]}` without a member count; the UI doesn't show "1:1" vs "group of 4". Phase 4+ adds a member-count column via a join (still RLS-filtered).
+- **`/users/search` lists every registered user** matching the prefix. There's no rate-limit and no "you can only see users you've chatted with". A future phase adds an opt-in visibility flag (e.g. `rw_user.rw_discoverable`) so users can hide from search.
+- **No pagination on `/users/search`.** `limit` is capped at 50; that's fine for the invite UI but doesn't scale to a corp-wide directory.
+- **Direct channels can be duplicated** (see Decision 4). A follow-up adds a unique index or a resolver that returns the existing channel if one exists.
 ---
 ## Phase 2 — Auth — Human intervention (Human)
 Due to a lack of time (Only 2 hours left now):
