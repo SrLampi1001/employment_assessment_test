@@ -1,0 +1,11 @@
+pgvector
+FastAPI
+Vite
+testcontainers
+psycopg
+pytest-bdd
+pytest
+NIM
+mistral-nemotron
+mistralai
+nvidia
