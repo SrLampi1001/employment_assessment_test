@@ -25,5 +25,23 @@
     "leave": "Leave",
     "owner_badge": "Owner",
     "member_badge": "Member"
+  },
+  "messages": {
+    "title": "Messages",
+    "select_channel": "Select a conversation",
+    "placeholder": "Write a message…",
+    "send": "Send",
+    "sending": "Sending…",
+    "failed": "Failed to send. Retry?",
+    "retry": "Retry",
+    "edit": "Edit",
+    "save": "Save",
+    "cancel_edit": "Cancel",
+    "delete": "Delete",
+    "deleted": "(message deleted)",
+    "edited_suffix": "(edited)",
+    "load_more": "Load more",
+    "loading": "Loading…",
+    "empty_channel": "No messages yet"
   }
 }

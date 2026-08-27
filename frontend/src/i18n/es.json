@@ -25,5 +25,23 @@
     "leave": "Salir",
     "owner_badge": "Propietario",
     "member_badge": "Miembro"
+  },
+  "messages": {
+    "title": "Mensajes",
+    "select_channel": "Selecciona una conversación",
+    "placeholder": "Escribe un mensaje…",
+    "send": "Enviar",
+    "sending": "Enviando…",
+    "failed": "Error al enviar. Reintentar.",
+    "retry": "Reintentar",
+    "edit": "Editar",
+    "save": "Guardar",
+    "cancel_edit": "Cancelar",
+    "delete": "Eliminar",
+    "deleted": "(mensaje eliminado)",
+    "edited_suffix": "(editado)",
+    "load_more": "Cargar más",
+    "loading": "Cargando…",
+    "empty_channel": "Aún no hay mensajes"
   }
 }
