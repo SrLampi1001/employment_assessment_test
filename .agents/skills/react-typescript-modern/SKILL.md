@@ -30,6 +30,8 @@ Before writing code, glance at `package.json` (or the lockfile) if one is availa
 | `vite` | 7.x | The standard scaffold — Create React App is dead, don't suggest it |
 | `node` | 22.22+ LTS | Floor required by React Router v8 |
 
+> **Honest caveat about TypeScript 7 + Vite 7.** The combination here matches because the *linter* is the gating dependency, not Vite. `typescript-eslint@8.63.0` (Aug 2026) has a peer dep of `typescript >=4.8.4 <6.1.0` — `npm run build` works with TS 7 + Vite 8, but `npm run lint` crashes inside `@typescript-eslint/typescript-estree` ([typescript-eslint#12518](https://github.com/typescript-eslint/typescript-eslint/issues/12518)). If the project adopts ESLint with `typescript-eslint`, the actual pin becomes **TS 6.x + Vite 7.x or Vite 8.x** until `typescript-eslint` lifts its peer-dep cap. Before adding a CI lint job, double-check that pin against the current `typescript-eslint` release notes.
+
 ## The trap: things that look idiomatic but are gone or replaced
 
 These aren't stylistic nitpicks — several of these will throw at build time or runtime on a current install, not just look old-fashioned.
