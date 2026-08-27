@@ -204,11 +204,26 @@ The write path goes through transactional DB functions/procedures, not raw SQL i
 - `rw_register_user(...)` — creates `rw_user` + `rw_auth_credential` atomically (Phase 1, 0040).
 - `rw_create_channel(...)` — creates channel + first member (creator as `owner`) (Phase 1, 0040).
 - `rw_add_channel_member(...)` — channel owner-only invite; SECURITY DEFINER (Phase 3, 0100). The `rw_channel_member` RLS policy (`rw_user_id = GUC`) lets the actor only see / modify their own membership rows, so adding a *different* user requires the function.
-- `rw_send_message(...)` — inserts message; trigger fills `rw_embedding` (Phase 4).
-- `rw_edit_message(...)` — appends `rw_message_edit`, updates body (Phase 4).
-- `rw_delete_message(...)` — logical delete (`rw_deleted_at`, `rw_deleted_reason`) (Phase 4).
+- `rw_send_message(...)` — inserts message; trigger fills `rw_embedding` (Phase 1, 0040). **Phase 4 (0110) added an `out_was_replay` OUT parameter** so the application can distinguish a fresh insert from an idempotent replay (same `client_ref`) without inspecting timestamps. The route surfaces 201 vs 200 based on this flag; the frontend's *pending → sent → failed* state machine uses the 200 + `X-Idempotent-Replay: true` response to dedupe.
+- `rw_edit_message(...)` — appends `rw_message_edit`, updates body (Phase 1, 0040; procedure).
+- `rw_delete_message(...)` — logical delete (`rw_deleted_at`, `rw_deleted_reason`) (Phase 1, 0040; procedure).
 
-See [`/backend/db/migrations/0100_rw_add_channel_member.sql`](../../db/migrations/0100_rw_add_channel_member.sql) for the Phase 3 pattern (SECURITY DEFINER + defense-in-depth actor + membership checks). The application layer's job is input validation and dispatch — **business rules live in the database**. This is the "thin use cases" rule from `ARCHITECTURE.md §5.1`.
+See [`/backend/db/migrations/0100_rw_add_channel_member.sql`](../../db/migrations/0100_rw_add_channel_member.sql) and [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../db/migrations/0110_rw_send_message_replay_flag.sql) for the two SECURITY DEFINER patterns. The application layer's job is input validation and dispatch — **business rules live in the database**. This is the "thin use cases" rule from `ARCHITECTURE.md §5.1`.
+
+### 4.8 CORS for the Vite dev server
+
+The Vite dev server lives on a different origin (default `http://127.0.0.1:5173`) than the FastAPI backend (`http://localhost:8000`). Phase 4 added a `CORSMiddleware` to `create_app` with defaults `http://localhost:5173` and `http://127.0.0.1:5173`. Phase 7 (deployment) locks the allow-list to the production frontend origin(s). See [`/backend/app/main.py:create_app`](../../backend/app/main.py) — the `cors_origins` parameter lets tests pass an empty list to disable CORS for in-process calls.
+
+### 4.9 Dev entrypoint
+
+[`/backend/dev_app.py`](../../backend/dev_app.py) wraps `create_app(Settings.from_env())` for `uvicorn dev_app:app`. Use:
+
+```bash
+RW_DATABASE_URL="postgresql://rw_app_login:dev_app_pwd@localhost:5433/db_santiago_sanchez_nakamoto" \
+  ./.venv/bin/python -m uvicorn dev_app:app --host 0.0.0.0 --port 8000
+```
+
+Tests use `create_app(settings=..., session_factory=...)` directly; `dev_app.py` is the dev-server seam.
 
 ## Step 5: Testing — BDD against real PostgreSQL
 

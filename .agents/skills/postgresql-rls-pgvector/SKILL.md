@@ -182,6 +182,28 @@ LIMIT $2;
 
 Both queries run under the same `app.current_user_id` RLS context, so non-members get zero rows by construction.
 
+## Step 9.5: Idempotent send + the `was_replay` OUT parameter
+
+The Phase 1 `rw_send_message(...)` function uses `ON CONFLICT DO NOTHING + RETURNING` for idempotency on `(rw_author_id, rw_client_ref) WHERE rw_client_ref IS NOT NULL`. Phase 4 added an `out_was_replay boolean` OUT parameter so the application can distinguish a fresh insert (201) from an idempotent replay (200, with `X-Idempotent-Replay: true`).
+
+**Why this matters:** a naive "compare timestamps" heuristic is unreliable (rows are inserted in the same transaction, so `now() - rw_created_at` is microseconds even for a replay). The cleanest signal is a flag from the function itself.
+
+**Two SQL gotchas to know about** (caught and fixed in Phase 4):
+
+1. **OUT parameter name = column name → ambiguous reference.** When the function has an OUT parameter called `rw_author_id` and a column called `rw_author_id`, `WHERE rw_author_id = p_author_id` in the body is ambiguous. Workarounds: (a) prefix the OUT parameters (`out_was_replay`, `out_rw_id`, …) — chosen here; (b) qualify every column reference with the table alias. (a) is shorter.
+2. **Partial unique index on `(rw_author_id, rw_client_ref) WHERE rw_client_ref IS NOT NULL`.** Postgres' `ON CONFLICT (rw_author_id, rw_client_ref)` doesn't accept a `WHERE` clause directly when a partial index is in play. The conflict target here is the named constraint (`uq_rw_message_client_ref`) plus the partial predicate, so we use:
+
+```sql
+INSERT INTO rw_message (rw_channel_id, rw_author_id, rw_client_ref, rw_body)
+VALUES (...)
+ON CONFLICT (rw_author_id, rw_client_ref)
+    WHERE rw_client_ref IS NOT NULL
+    DO NOTHING
+RETURNING * INTO v_msg;
+```
+
+See [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../../db/migrations/0110_rw_send_message_replay_flag.sql).
+
 ## Step 10: Seed / Bronze–Silver (ARCHITECTURE §9)
 
 Even for a one-shot load, Bronze keeps the seed as received (auditable, immutable). Silver is the 3FN model.
