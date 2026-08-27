@@ -56,7 +56,9 @@ SECURITY DEFINER
 STABLE
 AS $$
 DECLARE
-    v_locale  char(2);
+    v_locale  text;  -- 'spanish' / 'english' — text matches the
+                    -- regconfig overload of plainto_tsquery / to_tsvector
+                    -- (char(2) doesn't resolve to that overload).
 BEGIN
     IF p_actor_id IS DISTINCT FROM current_setting('app.current_user_id', true)::uuid THEN
         RAISE EXCEPTION 'rw_search_messages: actor mismatch with GUC';
@@ -76,8 +78,19 @@ BEGIN
 
     -- Pull the locale from the DB, not the client. This is the
     -- human-review check from issue #9 — locale MUST come from
-    -- rw_user.rw_locale, not be hardcoded.
-    SELECT rw_locale INTO v_locale FROM rw_user WHERE rw_id = p_actor_id;
+    -- rw_user.rw_locale, not be hardcoded. We accept the stored
+    -- 'es' / 'en' and expand to the full regconfig name; an unknown
+    -- value falls back to 'simple' so a malformed locale doesn't
+    -- 500 the whole search.
+    SELECT CASE rw_locale
+             WHEN 'es' THEN 'spanish'
+             WHEN 'en' THEN 'english'
+             ELSE          'simple'
+           END
+      INTO v_locale
+      FROM rw_user
+     WHERE rw_id = p_actor_id;
+
     IF v_locale IS NULL THEN
         RAISE EXCEPTION 'rw_search_messages: actor locale not found';
     END IF;
@@ -90,15 +103,16 @@ BEGIN
             m.rw_body,
             m.rw_created_at,
             ts_headline(
-                v_locale,
+                v_locale::regconfig,
                 m.rw_body,
-                plainto_tsquery(v_locale, p_query),
+                plainto_tsquery(v_locale::regconfig, p_query),
                 'StartSel=<mark>, StopSel=</mark>'
             ) AS rw_highlight
     FROM    rw_message m
     WHERE   m.rw_channel_id = p_channel_id
       AND   m.rw_deleted_at IS NULL
-      AND   to_tsvector(v_locale, m.rw_body) @@ plainto_tsquery(v_locale, p_query)
+      AND   to_tsvector(v_locale::regconfig, m.rw_body)
+              @@ plainto_tsquery(v_locale::regconfig, p_query)
     ORDER BY m.rw_created_at DESC
     LIMIT p_limit;
 END;
