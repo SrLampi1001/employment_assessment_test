@@ -16,21 +16,27 @@ from fastapi import FastAPI
 from .auth import Login, Refresh, RegisterUser
 from .channels import AddMember, CreateChannel, LeaveChannel, ListVisibleChannels
 from .config import Settings
+from .copilot import AskCopilot
 from .delivery import (
     JwtAuthMiddleware,
     build_auth_router,
     build_channels_router,
+    build_copilot_router,
     build_me_router,
     build_messages_router,
 )
 from .infrastructure import (
     Argon2idHasher,
+    MistralAdapter,
+    NvidiaAdapter,
     PostgresChannelMemberRepository,
     PostgresChannelRepository,
+    PostgresCopilotUsageRepository,
     PostgresMessageRepository,
     PostgresRefreshTokenStore,
     PostgresSearchRepository,
     PostgresUserRepository,
+    ProviderError,
     PyJwtService,
     make_session_factory,
 )
@@ -170,6 +176,52 @@ def create_app(
         message_repo_factory=message_repo_factory,
     )
 
+    # ── Phase 6: AI Copilot ─────────────────────────────────────────────
+    # The adapters are constructed lazily — if the API key is missing,
+    # we raise ProviderError on the FIRST copilot call (so the rest of
+    # the app boots cleanly for dev / tests). The use case converts
+    # ProviderError → CopilotError("provider-unavailable") → HTTP 503.
+    def _build_embedder() -> MistralAdapter:
+        if not settings.mistral_api_key:
+            raise ProviderError("MISTRAL_API_KEY is not set in .env")
+        return MistralAdapter(
+            api_key=settings.mistral_api_key,
+            model=settings.mistral_embed_model,
+        )
+
+    def _build_chatter() -> NvidiaAdapter:
+        if not settings.nvidia_api_key:
+            raise ProviderError("NVIDIA_API_KEY is not set in .env")
+        return NvidiaAdapter(
+            api_key=settings.nvidia_api_key,
+            default_model=settings.chat_model_primary,
+            timeout_s=settings.chat_request_timeout_s,
+        )
+
+    # For dev / test: prefer real adapters when keys are present,
+    # otherwise build thin stubs that raise `ai-not-configured`. The
+    # use case's `_chat_with_fallback` translates ProviderError →
+    # CopilotError("ai-not-configured", ...). This keeps the rest of
+    # the app + tests booting without keys, while production
+    # behaviour is honoured when both are set.
+    try:
+        embedder = _build_embedder()
+    except ProviderError:
+        embedder = _UnconfiguredEmbeddingProvider()
+    try:
+        chatter = _build_chatter()
+    except ProviderError:
+        chatter = _UnconfiguredChatProvider()
+
+    ask_copilot_uc = AskCopilot(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+        usage_repo_factory=PostgresCopilotUsageRepository,
+        embedder=embedder,
+        chatter=chatter,
+        settings=settings,
+    )
+
     # ── Routers ─────────────────────────────────────────────────────────
     app.include_router(
         build_auth_router(
@@ -203,5 +255,45 @@ def create_app(
             search_repo_factory=search_repo_factory,
         )
     )
+    app.include_router(
+        build_copilot_router(
+            ask_copilot=ask_copilot_uc,
+            session_factory=factory,
+        )
+    )
 
     return app
+
+
+# ─── Phase 6: dev-stub providers (raised when keys are absent) ──────
+
+
+class _UnconfiguredEmbeddingProvider:
+    """Stub that mirrors the EmbeddingProvider Protocol — raises
+    `ProviderError("ai-not-configured")` on the first call so the
+    HTTP layer can return 503 cleanly when MISTRAL_API_KEY is empty.
+
+    Used in dev / tests when no real key is set, so the rest of the
+    app boots normally.
+    """
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise ProviderError(
+            "ai-not-configured",
+            "MISTRAL_API_KEY is not set in .env",
+        )
+
+
+class _UnconfiguredChatProvider:
+    def chat(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> tuple[str, "ChatUsage"]:
+        raise ProviderError(
+            "ai-not-configured",
+            "NVIDIA_API_KEY is not set in .env",
+        )

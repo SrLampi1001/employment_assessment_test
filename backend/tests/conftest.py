@@ -201,6 +201,18 @@ def http_client(pg_app_session_factory, pg_app_url: str):
         access_ttl_seconds=900,
         refresh_ttl_seconds=3600,
         database_url=pg_app_url,
+        # Phase 6: AI providers — empty strings in tests so the
+        # main factory falls back to the "ai-not-configured" stubs.
+        # The copilot endpoint is tested separately (in test_copilot.py)
+        # with FakeEmbeddingProvider / FakeChatProvider injected.
+        mistral_api_key="",
+        nvidia_api_key="",
+        mistral_embed_model="mistral-embed",
+        mistral_embed_dim=1024,
+        chat_model_primary="mistralai/mistral-nemotron",
+        chat_model_fallback="nvidia/nemotron-3.5-lightning-30b-a3b",
+        chat_temperature=0.2,
+        chat_request_timeout_s=30.0,
     )
     app = create_app(settings=settings, session_factory=pg_app_session_factory)
     return TestClient(app)

@@ -304,6 +304,24 @@ class MessageRepository(Protocol):
         actually inserted (0 on a no-op call)."""
         ...
 
+    def search_similar(
+        self,
+        *,
+        actor_id: UUID,
+        embedding: list[float],
+        limit: int,
+    ) -> list[RetrievedChunk]:
+        """Phase 6: top-K nearest neighbours of `embedding` from
+        `rw_visible_message`, ordered by `<=>` (cosine distance).
+
+        The actor GUC is set by `RwSession`; the same RLS policy
+        that filters `GET /messages/` filters this query — a non-
+        member gets zero rows by construction (no separate "AI
+        permission layer" — the same `app.current_user_id` rule
+        applies, per ARCHITECTURE.md §4).
+        """
+        ...
+
 
 class SearchRepository(Protocol):
     """Phase 5: lexical search across `rw_message` with highlight.
@@ -335,3 +353,129 @@ class SessionFactory(Protocol):
 
 # Imported lazily to avoid pulling psycopg into the domain layer.
 from psycopg import Connection as PsycopgConnection  # noqa: E402  (type-only import)
+
+
+# ─── Phase 6: AI provider ports + copilot DTOs ──────────────────────────
+
+
+@dataclass(frozen=True)
+class ChatUsage:
+    """Token counts + model name returned by a chat provider call.
+
+    The audit row in `rw_copilot_usage` carries these directly. The
+    `cost_usd` field is intentionally absent from this DTO — the
+    use case computes cost from a pricing table so the adapter stays
+    model-agnostic.
+    """
+
+    prompt_tokens: int
+    completion_tokens: int
+    model: str
+
+
+@dataclass(frozen=True)
+class RetrievedChunk:
+    """One row of the RAG context window.
+
+    `distance` is the pgvector cosine distance (`<=>`) — lower is
+    closer. The use case may sort + truncate on `distance`.
+    """
+
+    rw_id: UUID
+    rw_channel_id: UUID
+    rw_body: str
+    rw_created_at: datetime
+    distance: float
+
+
+class ProviderError(Exception):
+    """Permanent provider failure (4xx other than 429, parse error, etc).
+
+    The use case surfaces this as a 502/503 to the client — there is
+    no automatic retry.
+    """
+
+
+class TransientProviderError(ProviderError):
+    """Transient failure (429, 5xx, network). The adapter has already
+    retried with exponential backoff; the use case may switch to the
+    fallback model or surface `ProviderUnavailable`.
+    """
+
+
+class EmbeddingProvider(Protocol):
+    """Vector embedding port. The copilot sends the user's question
+    through `embed([question])` and receives one 1024-dim vector per
+    text. The adapter implementation batches up to N texts per HTTP
+    call (Mistral free-tier friendliness).
+
+    Use cases depend only on this Protocol — never on `mistralai` /
+    `httpx` directly.
+    """
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Return one vector per input string, in the same order.
+
+        Raises `TransientProviderError` on 429 / 5xx after retries.
+        Raises `ProviderError` on permanent failure.
+        """
+        ...
+
+
+class ChatProvider(Protocol):
+    """Chat completion port (NVIDIA NIM today; OpenAI-compatible).
+
+    `chat(...)` returns the assistant text + token usage. The use
+    case records the usage into `rw_copilot_usage` even on failure
+    (with zero tokens) — see `AskCopilot`.
+    """
+
+    def chat(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> tuple[str, ChatUsage]:
+        """Return (assistant_text, usage).
+
+        Raises `TransientProviderError` on 429 / 5xx after retries.
+        Raises `ProviderError` on permanent failure.
+        """
+        ...
+
+
+class CopilotUsageRepository(Protocol):
+    """Audit-trail boundary for `rw_copilot_usage` (§11.4).
+
+    The use case calls `record(...)` UNCONDITIONALLY — success or
+    failure, tokens or zero tokens — so the §11.4 report can flag
+    misbehaving providers.
+    """
+
+    def record(
+        self,
+        *,
+        actor_id: UUID,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None: ...
+
+
+class CopilotUsageSummary(Protocol):
+    """Aggregated §11.4 view per user: total calls + tokens + cost."""
+
+    total_calls: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_cost_usd: float
+
+
+# ─── Phase 6: extend MessageRepository with vector retrieval ────────────
+
+
+# The `MessageRepository` Protocol above is already declared; this
+# extension is added here (instead of editing the existing block) so
+# the diff is minimal in the prior phases' search of the file.

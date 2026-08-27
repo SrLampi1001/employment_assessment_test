@@ -58,6 +58,11 @@ from .messages import (
     SearchHitSummary,
     SendMessage,
 )
+from .copilot import (
+    AskCopilot,
+    CopilotAnswer,
+    CopilotError,
+)
 
 
 # ─── Middleware ──────────────────────────────────────────────────────────
@@ -503,6 +508,12 @@ _STATUS_MAP = {
     "idempotent-replay": status.HTTP_200_OK,
     # ── Phase 5 search + read codes ────────────────────────────────────
     "invalid-query": status.HTTP_400_BAD_REQUEST,
+    # ── Phase 6 copilot codes ──────────────────────────────────────────
+    "invalid-question": status.HTTP_400_BAD_REQUEST,
+    "invalid-top-k": status.HTTP_400_BAD_REQUEST,
+    "embedding-unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "provider-unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "ai-not-configured": status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 
 
@@ -799,5 +810,111 @@ def build_messages_router(
             actor_id=actor, channel_id=channel_id
         )
         return MarkChannelReadOut(inserted=inserted)
+
+    return router
+
+
+# ─── Phase 6: AI Copilot endpoints ────────────────────────────────────
+
+
+class CopilotQueryIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    top_k: int = Field(default=8, ge=1, le=50)
+
+
+class CitationOut(BaseModel):
+    rw_id: UUID
+    rw_channel_id: UUID
+    snippet: str
+
+
+class CopilotAnswerOut(BaseModel):
+    """Wire shape for `POST /api/v1/copilot/query`.
+
+    `denial_code` is one of the four taxonomy codes from
+    `references/denial-taxonomy.md`; null when the model gave a
+    normal answer. `confidence` is `"low"` for the safe-comply
+    path; `"high"` otherwise. Both `200 OK` per the taxonomy.
+    """
+
+    text: str
+    citations: list[CitationOut]
+    denial_code: str | None
+    confidence: str
+    prompt_version: str
+
+
+class CopilotUsageOut(BaseModel):
+    """§11.4 audit aggregation per user."""
+
+    total_calls: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_cost_usd: float
+
+
+def build_copilot_router(
+    *,
+    ask_copilot: AskCopilot,
+    session_factory,
+) -> APIRouter:
+    """Routes for `/api/v1/copilot/query` + `/api/v1/copilot/usage`.
+
+    Authorization:
+    - All routes require a JWT (Depends(get_current_actor)).
+    - The actor GUC is set on every RwSession inside the use case
+      so RLS filters the retrieved context to the actor's visible
+      channels (per ARCHITECTURE §4 — the same posture as the rest
+      of the API; the LLM never sees a row the actor couldn't see
+      via direct GET /messages/).
+    - The `rw_copilot_usage` audit row is unconditional — success
+      or failure, tokens or zero tokens (§11.4 contract).
+    """
+    from .infrastructure import RwSession, fetch_copilot_usage_summary
+
+    router = APIRouter(prefix="/api/v1/copilot", tags=["copilot"])
+
+    @router.post("/query", response_model=CopilotAnswerOut)
+    async def query(
+        payload: CopilotQueryIn,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ) -> CopilotAnswerOut:
+        try:
+            ans: CopilotAnswer = ask_copilot(
+                actor_id=actor,
+                question=payload.question,
+                top_k=payload.top_k,
+            )
+        except CopilotError as e:
+            raise HTTPException(
+                status_code=_status_for(e.code), detail=e.message
+            ) from None
+        return CopilotAnswerOut(
+            text=ans.text,
+            citations=[
+                CitationOut(
+                    rw_id=c.rw_id,
+                    rw_channel_id=c.rw_channel_id,
+                    snippet=c.snippet,
+                )
+                for c in ans.citations
+            ],
+            denial_code=ans.denial_code,
+            confidence=ans.confidence,
+            prompt_version=ans.prompt_version,
+        )
+
+    @router.get("/usage", response_model=CopilotUsageOut)
+    async def usage(
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ) -> CopilotUsageOut:
+        with RwSession(session_factory, actor_id=actor) as conn:
+            summary = fetch_copilot_usage_summary(conn, actor_id=actor)
+        return CopilotUsageOut(
+            total_calls=summary.total_calls,
+            total_prompt_tokens=summary.total_prompt_tokens,
+            total_completion_tokens=summary.total_completion_tokens,
+            total_cost_usd=summary.total_cost_usd,
+        )
 
     return router
