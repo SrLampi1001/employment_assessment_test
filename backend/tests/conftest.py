@@ -222,7 +222,14 @@ def http_client(pg_app_session_factory, pg_app_url: str):
         settings=settings,
         session_factory=pg_app_session_factory,
         embedder=FakeEmbeddingProvider(),
-        chatter=FakeChatProvider(),
+        # `use_shared=True` makes the chatter honor the BDD shared
+        # `_SHARED_RESPONSE` state that `set_response()` /
+        # `push_back` mutate mid-scenario (see tests/step_defs/
+        # test_copilot.py for the safe-comply Scenario C). Default
+        # instances use their own `_response` attribute and would
+        # ignore the BDD state setter — making the pushback scenario
+        # impossible.
+        chatter=FakeChatProvider(use_shared=True),
     )
     return TestClient(app)
 
