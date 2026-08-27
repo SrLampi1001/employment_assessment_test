@@ -9,6 +9,13 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "pyjwt>=2.13.0",
     "uvicorn>=0.52.4",
+    # Phase 6: AI providers. mistralai is the official SDK; httpx
+    # is already a dev dep but the production runtime needs it for
+    # the sync NvidiaAdapter. Both are optional imports — the rest
+    # of the app boots without them (the adapter raises ProviderError
+    # when the key is empty + the env has no Mistral/NVIDIA key).
+    "httpx>=0.27",
+    "mistralai>=1.0.0",
 ]
 
 [dependency-groups]

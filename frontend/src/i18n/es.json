@@ -51,5 +51,19 @@
     "search_results_title_plural": "{{count}} coincidencias",
     "search_clear": "Limpiar",
     "search_loading": "Buscando…"
+  },
+  "copilot": {
+    "title": "Copiloto IA",
+    "empty": "Pregunta lo que quieras sobre tus mensajes visibles.",
+    "placeholder": "Pregunta al copiloto…",
+    "ask": "Preguntar",
+    "thinking": "Pensando…",
+    "error": "Error",
+    "deny_no_permission": "No tienes acceso a mensajes sobre este tema.",
+    "deny_out_of_scope": "Esa pregunta está fuera del alcance de este asistente.",
+    "deny_insufficient_context": "Tu historial visible no contiene eso. Prueba con otra pregunta.",
+    "infer_low_confidence": "Inferido con contexto incompleto. Confianza BAJA.",
+    "prompt_version": "prompt v{{v}}",
+    "confidence_label": "confianza: {{c}}"
   }
 }

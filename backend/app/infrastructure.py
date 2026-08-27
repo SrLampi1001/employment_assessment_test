@@ -31,7 +31,11 @@ from .domain import (
     ChannelMember,
     ChannelMemberRepository,
     ChannelRepository,
+    ChatProvider,
+    ChatUsage,
+    CopilotUsageRepository,
     DIRECT,
+    EmbeddingProvider,
     GROUP,
     JwtService,
     MEMBER,
@@ -39,11 +43,14 @@ from .domain import (
     MessageEdit,
     MessageRepository,
     PasswordHasher,
+    ProviderError,
     RefreshTokenRecord,
     RefreshTokenStore,
+    RetrievedChunk,
     SearchHit,
     SearchRepository,
     SessionFactory,
+    TransientProviderError,
     User,
     UserRepository,
 )
@@ -579,6 +586,57 @@ class PostgresMessageRepository:
             row = cur.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
+    def search_similar(
+        self,
+        *,
+        actor_id: UUID,
+        embedding: list[float],
+        limit: int,
+    ) -> list[RetrievedChunk]:
+        """Phase 6: top-K cosine neighbours from `rw_visible_message`.
+
+        The actor GUC is set by `RwSession` so RLS filters the rows
+        to channels the actor is a current member of. A non-member
+        gets an empty result set — the same posture as the rest of
+        the API. The query is parameterized; no string concatenation.
+
+        The HNSW index on `rw_embedding` (Phase 1, 0030_indexes.sql)
+        backs the `<=>` operator. We sort by `distance` ascending
+        and apply a keyset-style LIMIT (no OFFSET — AGENTS.md
+        prohibited actions).
+        """
+        # `::vector` is the pgvector literal cast. We render the
+        # embedding as a JSON array and let pgvector parse it; this
+        # is the documented pattern from the pgvector README.
+        vec_lit = "[" + ",".join(repr(float(v)) for v in embedding) + "]"
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_id, rw_channel_id, rw_body, rw_created_at, "
+                "       rw_embedding <=> %s::vector AS distance "
+                "FROM rw_visible_message "
+                "WHERE rw_deleted_at IS NULL "
+                "ORDER BY rw_embedding <=> %s::vector "
+                "LIMIT %s",
+                (vec_lit, vec_lit, limit),
+            )
+            rows = cur.fetchall()
+            return [
+                RetrievedChunk(
+                    rw_id=r[0],
+                    rw_channel_id=r[1],
+                    rw_body=r[2],
+                    rw_created_at=r[3],
+                    # Distance may be NULL if the row's embedding is
+                    # NULL (Phase 1 + the trigger only WARN — some
+                    # test data may have no embedding). Use a large
+                    # sentinel so the row still appears in the LIMIT
+                    # (NULL sorts last in ASC, but `ORDER BY x ASC`
+                    # skips NULL entirely in some plans). Use 1e9.
+                    distance=float(r[4]) if r[4] is not None else 1e9,
+                )
+                for r in rows
+            ]
+
     @staticmethod
     def _row_to_message(row: tuple) -> Message:
         return Message(
@@ -724,3 +782,239 @@ class _ConnectionFactory:
 
     def __call__(self) -> Connection:
         return Connection.connect(self.url, autocommit=False)
+
+
+# ─── Phase 6: AI provider adapters + audit repo ─────────────────────────
+
+
+# Lazy import so the rest of the codebase doesn't pull httpx into the
+# sync path until the copilot endpoint is exercised. The mistralai
+# SDK is optional too — only MistralAdapter imports it, so a project
+# that only runs the chat endpoint can install httpx alone.
+try:
+    import httpx  # noqa: F401  (used by NvidiaAdapter below)
+except ImportError:  # pragma: no cover — httpx is a dev dep already
+    httpx = None  # type: ignore[assignment]
+
+
+class MistralAdapter(EmbeddingProvider):
+    """Mistral `mistral-embed` (1024 dims). Free "Experiment" tier.
+
+    Batches up to `BATCH_LIMIT` texts per HTTP call (the Mistral free
+    tier is rate-limited per request, not per text — so batching is
+    the throughput lever). Three-attempt exponential backoff on
+    429 / 5xx.
+
+    Construction requires a real `MISTRAL_API_KEY`. The use case
+    refuses to instantiate this adapter when the key is empty;
+    `main.py` checks the env var and falls back to a placeholder
+    so the rest of the app still boots for development.
+    """
+
+    BATCH_LIMIT = 512
+    MAX_RETRIES = 3
+
+    def __init__(self, api_key: str, model: str = "mistral-embed") -> None:
+        if not api_key:
+            raise ProviderError(
+                "MISTRAL_API_KEY is empty; cannot construct MistralAdapter"
+            )
+        # Imported lazily so the SDK isn't required for unit tests
+        # that pass FakeEmbeddingProvider.
+        try:
+            from mistralai import Mistral  # type: ignore[import-not-found]
+        except ImportError:
+            from mistralai.client import Mistral  # type: ignore[import-not-found]
+
+        self._client = Mistral(api_key=api_key)
+        self._model = model
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        results: list[list[float]] = []
+        for start in range(0, len(texts), self.BATCH_LIMIT):
+            chunk = texts[start : start + self.BATCH_LIMIT]
+            results.extend(self._embed_chunk_with_retry(chunk))
+        return results
+
+    def _embed_chunk_with_retry(self, chunk: list[str]) -> list[list[float]]:
+        last_exc: Exception | None = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                resp = self._client.embeddings.create(
+                    model=self._model, inputs=chunk, encoding_format="float"
+                )
+                # Order-preserving: resp.data[i] corresponds to chunk[i].
+                return [d.embedding for d in resp.data]
+            except Exception as e:  # mistralai raises SDKError
+                last_exc = e
+                if attempt == self.MAX_RETRIES - 1:
+                    break
+                import time as _t
+
+                _t.sleep(2**attempt)
+        raise TransientProviderError(
+            f"mistral embed failed after {self.MAX_RETRIES} attempts: {last_exc}"
+        ) from last_exc
+
+
+class NvidiaAdapter(ChatProvider):
+    """NVIDIA NIM, OpenAI-compatible /chat/completions.
+
+    Synchronous adapter (`httpx.Client`) to match the rest of the
+    codebase's sync posture. The FastAPI handler is `async def` but
+    delegates to the sync RwSession-based use case anyway; adding an
+    async adapter would force async use cases across the whole
+    app and Phase 7 introduces a threadpool anyway.
+
+    Three-attempt exponential backoff on 429 / 5xx. The model name
+    comes from `Settings.chat_model_primary` (default
+    `mistralai/mistral-nemotron`) — never hardcoded here.
+    """
+
+    ENDPOINT = "https://integrate.api.nvidia.com/v1/chat/completions"
+    MAX_RETRIES = 3
+
+    def __init__(
+        self,
+        api_key: str,
+        default_model: str,
+        timeout_s: float = 30.0,
+    ) -> None:
+        if not api_key:
+            raise ProviderError(
+                "NVIDIA_API_KEY is empty; cannot construct NvidiaAdapter"
+            )
+        self._api_key = api_key
+        self._default_model = default_model
+        self._client = httpx.Client(timeout=timeout_s)
+
+    def chat(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> tuple[str, ChatUsage]:
+        payload = {
+            "model": model or self._default_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        last_exc: Exception | None = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                resp = self._client.post(
+                    self.ENDPOINT, json=payload, headers=headers
+                )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    last_exc = TransientProviderError(
+                        f"nvidia {resp.status_code}: {resp.text[:200]}"
+                    )
+                elif resp.status_code >= 400:
+                    raise ProviderError(
+                        f"nvidia {resp.status_code}: {resp.text[:200]}"
+                    )
+                else:
+                    data = resp.json()
+                    usage = data.get("usage", {})
+                    text = data["choices"][0]["message"]["content"]
+                    return text, ChatUsage(
+                        prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                        completion_tokens=int(
+                            usage.get("completion_tokens", 0)
+                        ),
+                        model=payload["model"],
+                    )
+            except ProviderError:
+                # Permanent — surface immediately, do not retry.
+                raise
+            except Exception as e:  # network / parse / etc
+                last_exc = TransientProviderError(f"nvidia chat error: {e}")
+
+            if attempt < self.MAX_RETRIES - 1:
+                import time as _t
+
+                _t.sleep(2**attempt)
+
+        # All retries exhausted on a transient error.
+        raise last_exc or ProviderError("nvidia chat failed (no detail)")
+
+    def close(self) -> None:
+        self._client.close()
+
+
+class PostgresCopilotUsageRepository(CopilotUsageRepository):
+    """Persist `rw_copilot_usage` rows (Phase 6, §11.4).
+
+    `record(...)` is the unconditional audit hook the use case
+    invokes on every copilot call — success or failure, tokens or
+    zero tokens. The §11.4 report groups by `rw_user_id` to spot
+    abuse / runaway tokens.
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def record(
+        self,
+        *,
+        actor_id: UUID,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO rw_copilot_usage "
+                "(rw_user_id, rw_model, rw_prompt_tokens, rw_completion_tokens) "
+                "VALUES (%s, %s, %s, %s)",
+                (actor_id, model, prompt_tokens, completion_tokens),
+            )
+
+
+@dataclass(frozen=True)
+class CopilotUsageSummary:
+    """Aggregated §11.4 view (per-user). Returned by the
+    `GET /api/v1/copilot/usage` endpoint."""
+
+    total_calls: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_cost_usd: float
+
+
+def fetch_copilot_usage_summary(
+    conn: Connection, *, actor_id: UUID
+) -> CopilotUsageSummary:
+    """`SELECT count(*), sum(...) FROM rw_copilot_usage WHERE rw_user_id=...`.
+
+    RLS does not apply (the policy on `rw_copilot_usage` is restrictive
+    enough that the actor can only see their own rows anyway), but
+    we still parameterize — defence in depth.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), "
+            "       COALESCE(sum(rw_prompt_tokens), 0), "
+            "       COALESCE(sum(rw_completion_tokens), 0), "
+            "       COALESCE(sum(rw_cost_usd), 0) "
+            "FROM rw_copilot_usage WHERE rw_user_id = %s",
+            (actor_id,),
+        )
+        row = cur.fetchone()
+        return CopilotUsageSummary(
+            total_calls=int(row[0] or 0),
+            total_prompt_tokens=int(row[1] or 0),
+            total_completion_tokens=int(row[2] or 0),
+            total_cost_usd=float(row[3] or 0.0),
+        )

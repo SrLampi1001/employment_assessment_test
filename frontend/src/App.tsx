@@ -4,6 +4,7 @@ import { clearTokens, getTokens, getUser } from './auth/api'
 import { LoginPanel } from './auth/LoginPanel'
 import { ChannelList } from './channels/ChannelList'
 import { Conversation } from './messages/Conversation'
+import { CopilotPanel } from './copilot/CopilotPanel'
 import { colors, radii } from './theme'
 
 /** Decode a JWT without verifying the signature — we only need the
@@ -135,7 +136,7 @@ export default function App() {
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: '280px 1fr',
+            gridTemplateColumns: '280px 1fr 360px',
             minHeight: 0,
           }}
         >
@@ -165,6 +166,10 @@ export default function App() {
               {t('messages.select_channel')}
             </div>
           )}
+          <CopilotPanel
+            accessToken={tokens.access_token}
+            contextKey={selectedChannelId ?? 'none'}
+          />
         </div>
       ) : (
         <div

@@ -9,6 +9,7 @@ a request body — the JWT middleware is the only source of identity.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import FastAPI
@@ -16,21 +17,27 @@ from fastapi import FastAPI
 from .auth import Login, Refresh, RegisterUser
 from .channels import AddMember, CreateChannel, LeaveChannel, ListVisibleChannels
 from .config import Settings
+from .copilot import AskCopilot
 from .delivery import (
     JwtAuthMiddleware,
     build_auth_router,
     build_channels_router,
+    build_copilot_router,
     build_me_router,
     build_messages_router,
 )
 from .infrastructure import (
     Argon2idHasher,
+    MistralAdapter,
+    NvidiaAdapter,
     PostgresChannelMemberRepository,
     PostgresChannelRepository,
+    PostgresCopilotUsageRepository,
     PostgresMessageRepository,
     PostgresRefreshTokenStore,
     PostgresSearchRepository,
     PostgresUserRepository,
+    ProviderError,
     PyJwtService,
     make_session_factory,
 )
@@ -52,6 +59,8 @@ def create_app(
     *,
     session_factory: Any | None = None,
     cors_origins: list[str] | None = None,
+    embedder: Any | None = None,
+    chatter: Any | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app.
 
@@ -66,6 +75,14 @@ def create_app(
             frontend can hit the API during local dev. In Phase 7
             the production deployment sets the actual frontend
             origin(s).
+        embedder: Phase 6 — override the embedding adapter. Used by
+            the BDD tests to inject `FakeEmbeddingProvider` so the
+            scenarios run against the real `pgvector` testcontainer
+            without making live Mistral calls. Production leaves
+            this None → builds `MistralAdapter` from settings.
+        chatter: Phase 6 — override the chat adapter. Same rationale
+            as `embedder`. Production leaves this None → builds
+            `NvidiaAdapter` from settings.
     """
     app = FastAPI(title="Riwi Co. Messaging Platform")
 
@@ -170,6 +187,66 @@ def create_app(
         message_repo_factory=message_repo_factory,
     )
 
+    # ── Phase 6: AI Copilot ─────────────────────────────────────────────
+    # The adapters are constructed lazily — if the API key is missing,
+    # we raise ProviderError on the FIRST copilot call (so the rest of
+    # the app boots cleanly for dev / tests). The use case converts
+    # ProviderError → CopilotError("provider-unavailable") → HTTP 503.
+    def _build_embedder() -> MistralAdapter:
+        if not settings.mistral_api_key:
+            raise ProviderError("MISTRAL_API_KEY is not set in .env")
+        return MistralAdapter(
+            api_key=settings.mistral_api_key,
+            model=settings.mistral_embed_model,
+        )
+
+    def _build_chatter() -> NvidiaAdapter:
+        if not settings.nvidia_api_key:
+            raise ProviderError("NVIDIA_API_KEY is not set in .env")
+        return NvidiaAdapter(
+            api_key=settings.nvidia_api_key,
+            default_model=settings.chat_model_primary,
+            timeout_s=settings.chat_request_timeout_s,
+        )
+
+    # Dev-mode helper: if `RW_DEV_USE_FAKE_COPILOT=1` is set in the
+    # environment (e.g. the Playwright MCP e2e run, where real API
+    # keys are not available), inject the in-process fakes that the
+    # BDD suite uses. They behave the same as the live providers but
+    # without touching the network. Production leaves this OFF so
+    # real Mistral + NVIDIA traffic flows.
+    if (
+        embedder is None
+        and chatter is None
+        and os.getenv("RW_DEV_USE_FAKE_COPILOT") == "1"
+    ):
+        from tests.fake_chat_provider import (
+            FakeChatProvider,
+            FakeEmbeddingProvider,
+        )
+
+        embedder = FakeEmbeddingProvider()
+        chatter = FakeChatProvider()
+    elif embedder is None:
+        try:
+            embedder = _build_embedder()
+        except ProviderError:
+            embedder = _UnconfiguredEmbeddingProvider()
+    elif chatter is None:
+        try:
+            chatter = _build_chatter()
+        except ProviderError:
+            chatter = _UnconfiguredChatProvider()
+
+    ask_copilot_uc = AskCopilot(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+        usage_repo_factory=PostgresCopilotUsageRepository,
+        embedder=embedder,
+        chatter=chatter,
+        settings=settings,
+    )
+
     # ── Routers ─────────────────────────────────────────────────────────
     app.include_router(
         build_auth_router(
@@ -203,5 +280,45 @@ def create_app(
             search_repo_factory=search_repo_factory,
         )
     )
+    app.include_router(
+        build_copilot_router(
+            ask_copilot=ask_copilot_uc,
+            session_factory=factory,
+        )
+    )
 
     return app
+
+
+# ─── Phase 6: dev-stub providers (raised when keys are absent) ──────
+
+
+class _UnconfiguredEmbeddingProvider:
+    """Stub that mirrors the EmbeddingProvider Protocol — raises
+    `ProviderError("ai-not-configured")` on the first call so the
+    HTTP layer can return 503 cleanly when MISTRAL_API_KEY is empty.
+
+    Used in dev / tests when no real key is set, so the rest of the
+    app boots normally.
+    """
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise ProviderError(
+            "ai-not-configured",
+            "MISTRAL_API_KEY is not set in .env",
+        )
+
+
+class _UnconfiguredChatProvider:
+    def chat(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> tuple[str, "ChatUsage"]:
+        raise ProviderError(
+            "ai-not-configured",
+            "NVIDIA_API_KEY is not set in .env",
+        )
