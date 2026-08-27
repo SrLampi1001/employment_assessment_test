@@ -182,12 +182,15 @@ def push_back(ctx: dict, http_client: httpx.Client, copilot_ctx: dict):
     """The user insists on a low-confidence answer after the initial
     insufficient-context denial. The same fake chat provider now
     returns the literal "Inferred with incomplete context: Confidence
-    LOW" marker, modelling the model's safe-comply behaviour."""
-    # Replace the chat provider's response mid-scenario via the
-    # module-level _state dict below.
-    import sys
-    fake_chat_module = sys.modules["tests.fake_chat_provider"]
-    fake_chat_module._next_response = (
+    LOW" marker, modelling the model's safe-comply behaviour.
+
+    The `http_client` fixture is wired with `FakeChatProvider(use_shared=True)`
+    (see conftest.py) so this `set_response()` call mutates the BDD
+    shared state that the live `chatter` reads on the next call.
+    """
+    from tests.fake_chat_provider import set_response
+
+    set_response(
         "Inferred with incomplete context: Confidence LOW. "
         "Best guess based on no visible context."
     )
