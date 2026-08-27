@@ -39,3 +39,10 @@ Thumbs.db
 # screenshots".
 .playwright-screenshots/
 .playwright-mcp/
+
+# Local dev-server logs — the AI agent redirects `uvicorn` stdout/
+# stderr to uvicorn.out / uvicorn.err while debugging in the
+# sandbox. Same noise category as the Playwright screenshots: not
+# versioned, regenerated on the next `uvicorn` invocation.
+backend/uvicorn.out
+backend/uvicorn.err
