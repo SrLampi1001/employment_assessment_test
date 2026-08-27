@@ -15,7 +15,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: riwi_test
+          POSTGRES_DB: db_santiago_sanchez_nakamoto_test
         ports:
           - 5432:5432
         options: >-
@@ -36,18 +36,20 @@ jobs:
         working-directory: backend
         run: uv sync
 
-      - name: Apply DB migrations
+      - name: Apply DB migrations (service db — for the verify-roles step)
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d riwi_test -f db/migrations/0001_extensions.sql
-          psql -h localhost -U postgres -d riwi_test -f db/migrations/0002_roles.sql
+          for f in db/migrations/*.sql; do
+            echo "### Applying $f"
+            psql -h localhost -U postgres -d db_santiago_sanchez_nakamoto_test -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Verify roles (NOLOGIN, no BYPASSRLS)
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d riwi_test -tAc \
+          psql -h localhost -U postgres -d db_santiago_sanchez_nakamoto_test -tAc \
             "SELECT rolname || ' | super=' || rolsuper || ' | bypassrls=' || rolbypassrls || ' | login=' || rolcanlogin FROM pg_roles WHERE rolname IN ('rw_app','rw_app_login','rw_migrator') ORDER BY rolname;"
           echo "---"
           echo "Expected (order-independent):"
@@ -55,7 +57,7 @@ jobs:
           echo "rw_app_login  | super=f | bypassrls=f | login=t"
           echo "rw_migrator   | super=f | bypassrls=f | login=t"
 
-      - name: Run tests
+      - name: Run tests (BDD against pgvector testcontainer)
         working-directory: backend
         run: uv run pytest -v
 

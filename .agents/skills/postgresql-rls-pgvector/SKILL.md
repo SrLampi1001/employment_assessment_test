@@ -82,358 +82,45 @@ Migrations are **forward-only**. Each file is idempotent (`IF NOT EXISTS`). The 
 
 ## Step 3: Tables — names, types, constraints
 
-Follow ARCHITECTURE §2.3 exactly. Highlights:
+Follow ARCHITECTURE §2.3 exactly.
 
-```sql
--- /db/migrations/0020_tables.sql
+**See the shipped files:**
 
-CREATE TABLE rw_user (
-    rw_id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_username     varchar(64)  UNIQUE NOT NULL,
-    rw_display_name varchar(120) NOT NULL,
-    rw_locale       char(2)      NOT NULL CHECK (rw_locale IN ('es','en')),
-    rw_created_at   timestamptz  NOT NULL DEFAULT now()
-);
+- [`/db/migrations/0020_tables.sql`](../../db/migrations/0020_tables.sql) — one-line summary: the 9 `rw_*` tables in 3FN dependency order (independent entities → channels → membership → messages → edit history → read receipts), every table `CREATE TABLE IF NOT EXISTS`, with the `rw_message_deletion_consistency` CHECK invariant on logical deletion (both columns null or both set).
+- [`/db/migrations/0030_indexes.sql`](../../db/migrations/0030_indexes.sql) — one-line summary: the two REQUIRED partial unique indexes (`uq_rw_channel_member_active` for one active membership per `(channel, user)`; `uq_rw_message_client_ref` for idempotent message send), plus the keyset pagination backing index `(rw_channel_id, rw_created_at DESC, rw_id DESC)`, the unread-count index, the HNSW `vector_cosine_ops` index, and per-locale GIN FTS indexes.
 
-CREATE TABLE rw_channel (
-    rw_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_name        varchar(120) NOT NULL,
-    rw_kind        smallint     NOT NULL CHECK (rw_kind IN (1, 2)),  -- 1=direct, 2=group
-    rw_created_by  uuid         NOT NULL REFERENCES rw_user(rw_id),
-    rw_created_at  timestamptz  NOT NULL DEFAULT now(),
-    rw_deleted_at  timestamptz
-);
-
-CREATE TABLE rw_channel_member (
-    rw_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_channel_id  uuid         NOT NULL REFERENCES rw_channel(rw_id),
-    rw_user_id     uuid         NOT NULL REFERENCES rw_user(rw_id),
-    rw_role        smallint     NOT NULL CHECK (rw_role IN (1, 2)),  -- 1=member, 2=owner
-    rw_joined_at   timestamptz  NOT NULL DEFAULT now(),
-    rw_left_at     timestamptz,
-    CONSTRAINT rw_channel_member_pair UNIQUE (rw_channel_id, rw_user_id)
-);
-
-CREATE TABLE rw_message (
-    rw_id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_channel_id     uuid         NOT NULL REFERENCES rw_channel(rw_id),
-    rw_author_id      uuid         NOT NULL REFERENCES rw_user(rw_id),
-    rw_client_ref     varchar(64),                    -- idempotency key, nullable
-    rw_body           text         NOT NULL CHECK (length(rw_body) BETWEEN 1 AND 8000),
-    rw_is_edited      boolean      NOT NULL DEFAULT false,
-    rw_created_at     timestamptz  NOT NULL DEFAULT now(),
-    rw_edited_at      timestamptz,
-    rw_deleted_at     timestamptz,
-    rw_deleted_reason text,
-    rw_embedding      vector(1024),
-    CONSTRAINT rw_message_deletion_consistency
-        CHECK ((rw_deleted_at IS NULL AND rw_deleted_reason IS NULL)
-            OR (rw_deleted_at IS NOT NULL AND rw_deleted_reason IS NOT NULL))
-);
-
-CREATE TABLE rw_message_edit (
-    rw_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_message_id  uuid         NOT NULL REFERENCES rw_message(rw_id),
-    rw_body        text         NOT NULL,
-    rw_edited_at   timestamptz  NOT NULL DEFAULT now(),
-    rw_editor_id   uuid         NOT NULL REFERENCES rw_user(rw_id)
-);
-
-CREATE TABLE rw_message_read (
-    rw_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_message_id  uuid         NOT NULL REFERENCES rw_message(rw_id),
-    rw_user_id     uuid         NOT NULL REFERENCES rw_user(rw_id),
-    rw_read_at     timestamptz  NOT NULL DEFAULT now(),
-    CONSTRAINT rw_message_read_once UNIQUE (rw_message_id, rw_user_id)
-);
-
-CREATE TABLE rw_auth_credential (
-    rw_user_id        uuid PRIMARY KEY REFERENCES rw_user(rw_id),
-    rw_password_hash  text NOT NULL  -- argon2id by the app
-);
-
-CREATE TABLE rw_refresh_token (
-    rw_id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_user_id     uuid         NOT NULL REFERENCES rw_user(rw_id),
-    rw_token_hash  text         NOT NULL UNIQUE,
-    rw_family_id   uuid         NOT NULL,
-    rw_expires_at  timestamptz  NOT NULL,
-    rw_revoked_at  timestamptz
-);
-
-CREATE TABLE rw_copilot_usage (
-    rw_id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    rw_user_id           uuid         NOT NULL REFERENCES rw_user(rw_id),
-    rw_model             varchar(120) NOT NULL,
-    rw_prompt_tokens     int          NOT NULL,
-    rw_completion_tokens int          NOT NULL,
-    rw_cost_usd          numeric(10,6) NOT NULL DEFAULT 0,
-    rw_created_at        timestamptz  NOT NULL DEFAULT now()
-);
-```
-
-### Indexes (ARCHITECTURE §2.4)
-
-```sql
--- /db/migrations/0030_indexes.sql
-
--- Required partial unique index #1: one ACTIVE membership per (channel, user)
-CREATE UNIQUE INDEX uq_rw_channel_member_active
-ON rw_channel_member (rw_channel_id, rw_user_id)
-WHERE rw_left_at IS NULL;
-
--- Required partial unique index #2: idempotent sends
-CREATE UNIQUE INDEX uq_rw_message_client_ref
-ON rw_message (rw_author_id, rw_client_ref)
-WHERE rw_client_ref IS NOT NULL;
-
--- Keyset pagination backing index (per-channel, newest first)
-CREATE INDEX ix_rw_message_channel_created
-ON rw_message (rw_channel_id, rw_created_at DESC, rw_id DESC);
-
--- Unread count backing index
-CREATE INDEX ix_rw_message_read_user_channel
-ON rw_message_read (rw_user_id, rw_message_id);
-
--- Vector ANN search (HNSW, cosine)
-CREATE INDEX ix_rw_message_embedding_hnsw
-ON rw_message USING hnsw (rw_embedding vector_cosine_ops);
-
--- Full-text search backing index (per language)
-CREATE INDEX ix_rw_message_body_es ON rw_message
-USING gin (to_tsvector('spanish', rw_body));
-CREATE INDEX ix_rw_message_body_en ON rw_message
-USING gin (to_tsvector('english', rw_body));
-```
+The names follow ARCHITECTURE §2.3 exactly (`snake_case`, `rw_` prefix, `uuid` PKs, `timestamptz` UTC with `DEFAULT now()`). Re-run safely — `IF NOT EXISTS` makes the migrations idempotent.
 
 ## Step 4: RLS policies (the heart of the system)
 
 RLS pattern from ARCHITECTURE §3. The actor is set transaction-local; the policy joins to `rw_channel_member` to verify membership.
 
-```sql
--- /db/migrations/0060_rls_policies.sql
-
-ALTER TABLE rw_channel       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE rw_channel_member ENABLE ROW LEVEL SECURITY;
-ALTER TABLE rw_message       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE rw_message_edit  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE rw_message_read  ENABLE ROW LEVEL SECURITY;
-
--- Read access: actor is a current member of the channel
-CREATE POLICY rw_message_visibility ON rw_message
-FOR SELECT
-USING (
-    EXISTS (
-        SELECT 1 FROM rw_channel_member m
-        WHERE m.rw_channel_id  = rw_message.rw_channel_id
-          AND m.rw_user_id     = current_setting('app.current_user_id', true)::uuid
-          AND m.rw_left_at IS NULL
-    )
-);
-
--- Insert: same condition; the row must reference a channel the actor is a member of
-CREATE POLICY rw_message_insert ON rw_message
-FOR INSERT
-WITH CHECK (
-    EXISTS (
-        SELECT 1 FROM rw_channel_member m
-        WHERE m.rw_channel_id = rw_message.rw_channel_id
-          AND m.rw_user_id    = current_setting('app.current_user_id', true)::uuid
-          AND m.rw_left_at IS NULL
-    )
-    AND rw_author_id = current_setting('app.current_user_id', true)::uuid
-);
-
--- Update: actor is a member AND is the author (no editing other people's messages)
-CREATE POLICY rw_message_update ON rw_message
-FOR UPDATE
-USING (
-    rw_author_id = current_setting('app.current_user_id', true)::uuid
-    AND EXISTS (
-        SELECT 1 FROM rw_channel_member m
-        WHERE m.rw_channel_id = rw_message.rw_channel_id
-          AND m.rw_user_id    = current_setting('app.current_user_id', true)::uuid
-          AND m.rw_left_at IS NULL
-    )
-)
-WITH CHECK (rw_deleted_at IS NULL);   -- logical delete goes through the procedure
-
--- rw_message_edit inherits the same membership check
-CREATE POLICY rw_message_edit_visibility ON rw_message_edit
-FOR SELECT
-USING (
-    EXISTS (
-        SELECT 1 FROM rw_message msg
-        JOIN rw_channel_member m
-          ON m.rw_channel_id = msg.rw_channel_id
-         AND m.rw_user_id    = current_setting('app.current_user_id', true)::uuid
-         AND m.rw_left_at IS NULL
-        WHERE msg.rw_id = rw_message_edit.rw_message_id
-    )
-);
-
--- rw_message_read: an actor reads/marks messages in channels they're a member of
-CREATE POLICY rw_message_read_visibility ON rw_message_read
-FOR ALL
-USING (
-    rw_user_id = current_setting('app.current_user_id', true)::uuid
-);
-
--- rw_channel_member: actor sees their own memberships; can leave (set rw_left_at)
-CREATE POLICY rw_channel_member_self ON rw_channel_member
-FOR ALL
-USING (rw_user_id = current_setting('app.current_user_id', true)::uuid);
-
--- rw_channel: actor sees channels they're a current member of
-CREATE POLICY rw_channel_visibility ON rw_channel
-FOR SELECT
-USING (
-    EXISTS (
-        SELECT 1 FROM rw_channel_member m
-        WHERE m.rw_channel_id = rw_channel.rw_id
-          AND m.rw_user_id    = current_setting('app.current_user_id', true)::uuid
-          AND m.rw_left_at IS NULL
-    )
-);
-```
+**See the shipped file:** [`/db/migrations/0060_rls_policies.sql`](../../db/migrations/0060_rls_policies.sql) — one-line summary: RLS is enabled on the five user-visible tables (`rw_channel`, `rw_channel_member`, `rw_message`, `rw_message_edit`, `rw_message_read`); 8 policies split SELECT / INSERT / UPDATE / ALL per table; every policy reads the actor from `current_setting('app.current_user_id', true)::uuid` and joins to `rw_channel_member` to verify the actor is a current member of the channel. Idempotent — each policy is `DROP POLICY IF EXISTS` then `CREATE POLICY`.
 
 **Two important details:**
 
-1. **`current_setting('app.current_user_id', true)` — note the `true` second argument.** It returns `NULL` (instead of erroring) when the GUC is unset. Cast `::uuid` then fails closed (returns zero rows) instead of failing open. This is the difference between a security model and a security incident.
-2. **Privileges for the app role.** `GRANT SELECT, INSERT, UPDATE, DELETE ON rw_* TO rw_app;` — RLS is the *row-level* filter; standard `GRANT` is still needed at the table level. The default-deny policy applies if RLS is enabled with no matching `FOR SELECT` policy.
+1. **`current_setting('app.current_user_id', true)` — note the `true` second argument.** It returns `NULL` (instead of erroring) when the GUC is unset. Cast `::uuid` then fails closed (returns zero rows) instead of failing open. This is the difference between a security model and a security incident. *Known edge case:* an explicitly set empty string (e.g. `set_config(..., NULL, false)` from a test) errors on the `::uuid` cast — still fail-closed (no leak) but ugly. Wrap in `NULLIF(setting, '')` if a cleaner error is needed.
+2. **Privileges for the app role.** [`/db/migrations/0080_grants.sql`](../../db/migrations/0080_grants.sql) issues the standard `GRANT SELECT, INSERT, UPDATE, DELETE ON rw_* TO rw_app` + `GRANT EXECUTE ON FUNCTION/PROCEDURE ...` — RLS is the *row-level* filter; standard `GRANT` is still needed at the table level. The default-deny policy applies if RLS is enabled with no matching `FOR SELECT` policy.
 
 ## Step 5: Transactional functions and procedures
 
 The write path goes through DB functions/procedures, not raw application SQL (ARCHITECTURE §3 + §5.1).
 
-```sql
--- /db/migrations/0040_functions_procedures.sql
-
-CREATE OR REPLACE FUNCTION rw_register_user(
-    p_username      varchar,
-    p_display_name  varchar,
-    p_locale        char(2),
-    p_password_hash text
-) RETURNS uuid
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_user_id uuid;
-BEGIN
-    INSERT INTO rw_user (rw_username, rw_display_name, rw_locale)
-    VALUES (p_username, p_display_name, p_locale)
-    RETURNING rw_id INTO v_user_id;
-
-    INSERT INTO rw_auth_credential (rw_user_id, rw_password_hash)
-    VALUES (v_user_id, p_password_hash);
-
-    RETURN v_user_id;
-END;
-$$ SECURITY DEFINER;
-
-CREATE OR REPLACE FUNCTION rw_send_message(
-    p_channel_id  uuid,
-    p_author_id   uuid,
-    p_body        text,
-    p_client_ref  varchar DEFAULT NULL
-) RETURNS rw_message
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_msg rw_message;
-BEGIN
-    INSERT INTO rw_message (rw_channel_id, rw_author_id, rw_client_ref, rw_body)
-    VALUES (p_channel_id, p_author_id, p_client_ref, p_body)
-    ON CONFLICT (rw_author_id, rw_client_ref)
-        WHERE rw_client_ref IS NOT NULL
-        DO NOTHING
-    RETURNING * INTO v_msg;
-
-    IF v_msg.rw_id IS NULL THEN
-        SELECT * INTO v_msg FROM rw_message
-        WHERE rw_author_id = p_author_id AND rw_client_ref = p_client_ref;
-    END IF;
-
-    RETURN v_msg;
-END;
-$$ SECURITY DEFINER;
-
-CREATE OR REPLACE PROCEDURE rw_edit_message(
-    p_message_id uuid,
-    p_editor_id  uuid,
-    p_new_body   text
-)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    INSERT INTO rw_message_edit (rw_message_id, rw_body, rw_editor_id)
-    VALUES (p_message_id, p_new_body, p_editor_id);
-
-    UPDATE rw_message
-       SET rw_body = p_new_body,
-           rw_is_edited = true,
-           rw_edited_at = now()
-     WHERE rw_id = p_message_id;
-END;
-$$ SECURITY DEFINER;
-
-CREATE OR REPLACE PROCEDURE rw_delete_message(
-    p_message_id uuid,
-    p_actor_id   uuid,
-    p_reason     text
-)
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    UPDATE rw_message
-       SET rw_deleted_at = now(),
-           rw_deleted_reason = p_reason
-     WHERE rw_id = p_message_id
-       AND rw_author_id = p_actor_id;
-END;
-$$ SECURITY DEFINER;
-```
+**See the shipped file:** [`/db/migrations/0040_functions_procedures.sql`](../../db/migrations/0040_functions_procedures.sql) — one-line summary: 3 functions (`rw_register_user`, `rw_create_channel`, `rw_send_message`) and the 2 REQUIRED procedures (`rw_edit_message`, `rw_delete_message`), all `LANGUAGE plpgsql SECURITY DEFINER`. Each function checks `p_actor_id = current_setting('app.current_user_id', true)::uuid` and re-verifies membership explicitly (defense in depth: the function is `SECURITY DEFINER`, so RLS does *not* block the write — the body has to).
 
 Why `SECURITY DEFINER`? Because the procedure runs with the privileges of the function owner (the migrator role). It still goes through RLS checks for the actor's *row* visibility — but it can insert into `rw_message_edit` (which an unprivileged role could be restricted from doing directly). The combination is "RLS filters which rows are visible, SECURITY DEFINER lets the trusted DB function modify them on behalf of the actor".
 
 ## Step 6: Triggers — keeping `rw_embedding` in lockstep
 
-```sql
--- /db/migrations/0050_triggers.sql
-
-CREATE OR REPLACE FUNCTION rw_compute_message_embedding() RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    -- Embedding is computed in the application layer and passed via the INSERT/UPDATE.
-    -- This trigger only validates that the row was provided one if the body is non-empty.
-    -- If you prefer server-side embedding, swap the body of this trigger for a call to
-    -- an `EmbeddingProvider` HTTP extension (e.g. pg_net) — but that ties the DB to a
-    -- network call, which is usually the wrong trade.
-    IF NEW.rw_body IS NOT NULL AND NEW.rw_embedding IS NULL THEN
-        RAISE WARNING 'rw_message inserted without embedding; copilot search will skip it';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER trg_message_embedding
-AFTER INSERT OR UPDATE OF rw_body ON rw_message
-FOR EACH ROW EXECUTE FUNCTION rw_compute_message_embedding();
-```
+**See the shipped file:** [`/db/migrations/0050_triggers.sql`](../../db/migrations/0050_triggers.sql) — one-line summary: `rw_compute_message_embedding()` AFTER INSERT OR UPDATE OF `rw_body` on `rw_message`; `RAISE WARNING` if a row landed without an embedding (the seed script can't silently skip the embed step). Idempotent — `DROP TRIGGER IF EXISTS` then `CREATE TRIGGER`.
 
 The project chose to compute embeddings in the application (`infrastructure/ai/MistralAdapter`) and pass them in via the `rw_send_message` parameter list. The trigger exists as a guardrail — `RAISE WARNING` if a row landed without one, so the seed script can't silently skip the embed step.
 
 ## Step 7: Views
 
-```sql
--- /db/migrations/0070_views.sql
+**See the shipped file:** [`/db/migrations/0070_views.sql`](../../db/migrations/0070_views.sql) — one-line summary: one view, `rw_visible_message`, declared **WITH (security_invoker = true)** so RLS on `rw_message` applies through it (PG 15+ changed the default to `security_invoker = false`, which would let the view run as the migrator / superuser and silently re-introduce the leak the policies are here to close). Filter is `rw_deleted_at IS NULL`.
 
-CREATE VIEW rw_visible_message AS
-SELECT * FROM rw_message WHERE rw_deleted_at IS NULL;
-
--- RLS still applies on top of the view (Postgres honours RLS on the underlying table).
--- This view just collapses the "is it logically deleted?" check so query authors don't have to remember.
+RLS still applies on top of the view (Postgres honours RLS on the underlying table). This view just collapses the "is it logically deleted?" check so query authors don't have to remember.
 
 ---
 

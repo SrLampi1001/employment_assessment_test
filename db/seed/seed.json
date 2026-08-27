@@ -1,0 +1,70 @@
+{
+  "users": [
+    {
+      "username": "camila",
+      "display_name": "Camila Nakamoto",
+      "locale": "es",
+      "password": "dev_password"
+    },
+    {
+      "username": "valentina",
+      "display_name": "Valentina Restrepo",
+      "locale": "es",
+      "password": "dev_password"
+    },
+    {
+      "username": "andres",
+      "display_name": "Andrés Kim",
+      "locale": "en",
+      "password": "dev_password"
+    }
+  ],
+  "channels": [
+    {
+      "name": "team-1",
+      "kind": "group",
+      "owner": "camila",
+      "members": ["camila", "valentina", "andres"],
+      "messages": [
+        { "author": "camila",    "created_at": "2026-08-26T09:00:00Z", "body": "Buenos días equipo, ¿listos para empezar la integración del MVP?" },
+        { "author": "valentina", "created_at": "2026-08-26T09:01:30Z", "body": "Listos. Empezamos con la review del módulo de auth." },
+        { "author": "andres",    "created_at": "2026-08-26T09:02:45Z", "body": "I can take the JWT refresh rotation part." },
+        { "author": "camila",    "created_at": "2026-08-26T09:04:00Z", "body": "Perfecto. Yo cierro la spec de los endpoints hoy." },
+        { "author": "valentina", "created_at": "2026-08-26T09:05:30Z", "body": "Una pregunta: ¿el BDD lo corremos contra el testcontainer o contra el stack local?" },
+        { "author": "andres",    "created_at": "2026-08-26T09:06:45Z", "body": "Testcontainer. It spins up the real pgvector image, so RLS is actually exercised." },
+        { "author": "camila",    "created_at": "2026-08-26T09:08:00Z", "body": "Confirmado. La política de visibilidad va en el postgres-rls-pgvector skill." },
+        { "author": "valentina", "created_at": "2026-08-26T09:09:30Z", "body": "OK, me toca a mí el fixture del BDD entonces." },
+        { "author": "andres",    "created_at": "2026-08-26T09:11:00Z", "body": "I'll start with the schema migrations so you can layer the BDD on top." },
+        { "author": "camila",    "created_at": "2026-08-26T09:12:30Z", "body": "Gracias Andrés. Yo avanzo con el copilot." },
+        { "author": "valentina", "created_at": "2026-08-26T09:14:00Z", "body": "Acabo de probar el trigger de embeddings, se ve sólido." },
+        { "author": "andres",    "created_at": "2026-08-26T09:15:30Z", "body": "Good. Are we handling the case where the seed loader runs against an already-populated DB?" },
+        { "author": "camila",    "created_at": "2026-08-26T09:17:00Z", "body": "Sí, el script es idempotente — TRUNCATE antes de INSERT." },
+        { "author": "valentina", "created_at": "2026-08-26T09:18:30Z", "body": "Perfecto. ¿Confirmamos el nombre de la BD?" },
+        { "author": "andres",    "created_at": "2026-08-26T09:20:00Z", "body": "db_santiago_sanchez_nakamoto, per the brief." },
+        { "author": "camila",    "created_at": "2026-08-26T09:21:30Z", "body": "Listo, lo dejo así." },
+        { "author": "valentina", "created_at": "2026-08-26T09:23:00Z", "body": "Para la demo del martes, ¿necesitamos algo más?" },
+        { "author": "andres",    "created_at": "2026-08-26T09:24:30Z", "body": "Just the seed + a 5-minute walkthrough of the RLS scenarios." },
+        { "author": "camila",    "created_at": "2026-08-26T09:26:00Z", "body": "Hecho. Nos vemos mañana." },
+        { "author": "valentina", "created_at": "2026-08-26T09:27:30Z", "body": "Hasta mañana, equipo." }
+      ]
+    },
+    {
+      "name": "Camila-private",
+      "kind": "direct",
+      "owner": "camila",
+      "members": ["camila", "andres"],
+      "messages": [
+        { "author": "camila", "created_at": "2026-08-26T11:00:00Z", "body": "Oye, ¿revisaste el bug del trigger de embeddings?" },
+        { "author": "andres", "created_at": "2026-08-26T11:05:00Z", "body": "Sí, era un race condition entre el trigger AFTER INSERT y la lectura concurrente." },
+        { "author": "camila", "created_at": "2026-08-26T11:07:00Z", "body": "Bien. ¿Lo cubrimos con el BDD?" },
+        { "author": "andres", "created_at": "2026-08-26T11:08:30Z", "body": "Sí, agregué un scenario que hace INSERT + lectura inmediata." },
+        { "author": "camila", "created_at": "2026-08-26T11:10:00Z", "body": "¿Y la otra cosa sobre la política de seguridad del view?" },
+        { "author": "andres", "created_at": "2026-08-26T11:11:30Z", "body": "Cambié a WITH (security_invoker = true). Sin eso, el view ejecuta como superuser y se salta todo RLS." },
+        { "author": "camila", "created_at": "2026-08-26T11:13:00Z", "body": "Excelente, eso era exactamente lo que faltaba." },
+        { "author": "andres", "created_at": "2026-08-26T11:14:30Z", "body": "Mañana te paso el diff del commit." },
+        { "author": "camila", "created_at": "2026-08-26T11:16:00Z", "body": "Perfecto. Esto se queda entre nosotros hasta la demo." },
+        { "author": "andres", "created_at": "2026-08-26T11:17:00Z", "body": "Ok." }
+      ]
+    }
+  ]
+}

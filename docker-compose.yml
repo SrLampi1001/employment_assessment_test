@@ -22,7 +22,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-riwi}
+      POSTGRES_DB: ${POSTGRES_DB:-db_santiago_sanchez_nakamoto}
     ports:
       # ${POSTGRES_PORT:-5433}:5432 — internal PG port stays 5432 so
       # `docker compose exec db psql ...` works exactly as documented;

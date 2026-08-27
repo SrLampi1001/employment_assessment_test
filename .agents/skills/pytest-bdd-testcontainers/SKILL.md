@@ -52,53 +52,7 @@ tests/
 
 The Postgres container is started **once per test session** — not once per test — because spinning up a container takes 2–5 seconds and the migrations are expensive. Tests share the database but each test gets a clean schema (or a transactional rollback).
 
-```python
-# /backend/tests/conftest.py
-from __future__ import annotations
-import os, subprocess, uuid, pytest
-from pathlib import Path
-from testcontainers.postgres import PostgresContainer
-import psycopg
-
-PG_IMAGE = "pgvector/pgvector:pg18"
-
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "db" / "migrations"
-
-@pytest.fixture(scope="session")
-def pg_url() -> str:
-    with PostgresContainer(PG_IMAGE) as pg:
-        url = pg.get_connection_url()
-        _run_migrations(url)
-        _create_app_role(url)
-        yield url
-
-def _run_migrations(url: str) -> None:
-    """Apply every .sql file in MIGRATIONS_DIR in lexicographic order."""
-    conn = psycopg.connect(url, autocommit=True)
-    try:
-        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            sql = path.read_text()
-            with conn.cursor() as cur:
-                cur.execute(sql)
-    finally:
-        conn.close()
-
-def _create_app_role(url: str) -> None:
-    """Create the rw_app role the way production does: no BYPASSRLS, no SUPERUSER."""
-    conn = psycopg.connect(url, autocommit=True)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("CREATE ROLE rw_app NOLOGIN;")  # NOLOGIN; tests connect AS this role via SET ROLE
-            cur.execute("GRANT USAGE ON SCHEMA public TO rw_app;")
-            cur.execute(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rw_app;"
-            )
-            cur.execute(
-                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO rw_app;"
-            )
-    finally:
-        conn.close()
-```
+**See the shipped fixture:** [`/backend/tests/conftest.py`](../../backend/tests/conftest.py) — one-line summary: `pg_container` (session-scoped `PostgresContainer("pgvector/pgvector:pg18")`), `_bootstrap` (applies migrations + creates `rw_app_login` with the test password), and `pg_super_url` / `pg_app_url` (the two URLs the rest of the suite uses). Migrations are sourced from `/db/migrations/*.sql` and 0001 + 0002 are skipped (the testcontainer ships `pgcrypto`/`vector`; roles are created with a test-only password). Per-test rollback vs truncate lives in the `super_conn` and `actor_conn` fixtures.
 
 A session-scoped container + per-test transaction rollback is the fastest realistic pattern; see `references/per-test-rollback.md` for the implementation.
 
@@ -106,41 +60,7 @@ A session-scoped container + per-test transaction rollback is the fastest realis
 
 Every test that touches business data must set `app.current_user_id` to the actor it's testing as. Never connect as a `postgres` superuser for the actual query under test — superusers bypass RLS by definition.
 
-```python
-# /backend/tests/conftest.py
-import contextlib
-import psycopg
-
-@pytest.fixture
-def as_actor(pg_url):
-    """Yields a callable that opens a connection as rw_app with the given actor id set."""
-    def _open(actor_id: uuid.UUID) -> psycopg.Connection:
-        # Connect as the migration role (has BYPASSRLS) only to SET ROLE and the GUC.
-        admin = psycopg.connect(pg_url, autocommit=False)
-        try:
-            with admin.cursor() as cur:
-                cur.execute("SET ROLE rw_app")
-                cur.execute("SELECT set_config('app.current_user_id', %s, true)", (str(actor_id),))
-            admin.commit()
-        except Exception:
-            admin.close()
-            raise
-        return admin
-    return _open
-```
-
-Use case:
-
-```python
-def test_non_member_cannot_see_message(pg_url, as_actor, seed_two_users_one_channel):
-    camila, _channel, _msg = seed_two_users_one_channel  # Camila is the author
-    non_member = uuid.uuid4()
-    with as_actor(non_member) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM rw_visible_message")
-            (count,) = cur.fetchone()
-            assert count == 0, "RLS leaked a message to a non-member"
-```
+**See the shipped helper:** [`/backend/tests/conftest.py`](../../backend/tests/conftest.py) — `as_actor(conn, actor_id)` calls `set_config('app.current_user_id', %s, false)`; the `_seed` fixture (autouse) resets the dataset between tests via `TRUNCATE ... CASCADE`. The same module exports the canonical actor UUIDs (`VALENTINA`, `CAMILA`, `CHANNEL_PRIVATE`, `CHANNEL_TEAM1`) so step defs and the feature file stay in sync.
 
 The test asserts the security guarantee, not the implementation. If you find yourself asserting on the absence of an `EXISTS` clause or a specific GUC name, you're testing the wrong layer.
 
@@ -181,30 +101,7 @@ The `application.container.override(...)` pattern depends on whatever DI mechani
 
 These come straight from `ARCHITECTURE.md §10`. They are the executable spec for the security model — keep them green.
 
-```gherkin
-# /backend/tests/features/membership.feature
-Feature: Visible messages by channel membership
-
-  Scenario: Non-member cannot see a private channel's messages
-    Given user "Valentina" exists with locale "en"
-    And user "Camila" exists with locale "en"
-    And a channel named "Camila-private" exists with owner "Camila"
-    And "Camila" sends a message "secret plan" in "Camila-private"
-    When "Valentina" requests the channel history of "Camila-private"
-    Then the response contains no messages
-    When "Valentina" searches messages for "secret"
-    Then the search results contain no messages
-    When "Valentina" asks the copilot "What is the plan?"
-    Then the copilot answer carries the "deny:no-permission" denial code
-
-  Scenario: An author always sees their own channel's messages
-    Given user "Valentina" exists with locale "en"
-    And a channel named "team-1" exists with owner "Valentina"
-    And "Valentina" sends a message "hello team" in "team-1"
-    And "Valentina" leaves "team-1"
-    When "Valentina" requests the channel history of "team-1"
-    Then the response contains the message "hello team"
-```
+**See the shipped feature file:** [`/backend/tests/features/membership.feature`](../../backend/tests/features/membership.feature) — one-line summary: two scenarios (non-member cannot see private channel's messages across history / search / copilot; author always sees their own messages despite role changes) wired to the `_seed` fixture in `conftest.py`. Step definitions live in [`/backend/tests/step_defs/test_membership.py`](../../backend/tests/step_defs/test_membership.py) and are bound to the feature via `scenarios(str(_FEATURE_FILE))` (pytest-bdd 8.x removed auto-discovery).
 
 Notes on the Gherkin:
 
@@ -215,58 +112,7 @@ Notes on the Gherkin:
 
 ## Step 5: Step definitions (skeleton)
 
-```python
-# /backend/tests/step_defs/membership_steps.py
-from pytest_bdd import given, when, then, parsers
-import uuid
-
-@given('user "<name>" exists with locale "<locale>"')
-def _(name, locale, ctx):
-    user_id = uuid.uuid4()
-    ctx.create_user(user_id=user_id, username=name.lower(), display_name=name, locale=locale)
-    ctx[f"user:{name}"] = user_id
-
-@given(parsers.parse('a channel named "{name}" exists with owner "{owner}"'))
-def _(name, owner, ctx):
-    channel_id = uuid.uuid4()
-    owner_id = ctx[f"user:{owner}"]
-    ctx.create_channel(channel_id=channel_id, name=name, owner_id=owner_id)
-    ctx[f"channel:{name}"] = channel_id
-
-@given(parsers.parse('"{sender}" sends a message "{body}" in "{channel}"'))
-def _(sender, body, channel, ctx, client):
-    r = client.post(
-        f"/api/v1/channels/{ctx[f'channel:{channel}']}/messages",
-        json={"body": body, "client_ref": uuid.uuid4().hex},
-        headers={"Authorization": f"Bearer {ctx.tokens[sender]}"},
-    )
-    assert r.status_code == 201, r.text
-
-@when(parsers.parse('"{actor}" requests the channel history of "{channel}"'))
-def _(actor, channel, ctx, client):
-    r = client.get(
-        f"/api/v1/channels/{ctx[f'channel:{channel}']}/messages?limit=50",
-        headers={"Authorization": f"Bearer {ctx.tokens[actor]}"},
-    )
-    ctx.last_response = r
-
-@then("the response contains no messages")
-def _(ctx):
-    body = ctx.last_response.json()
-    assert body["items"] == [], body
-
-@then(parsers.parse('the copilot answer carries the "{code}" denial code'))
-def _(code, ctx, client):
-    r = client.post(
-        "/api/v1/copilot/query",
-        json={"question": ctx.last_question},
-        headers={"Authorization": f"Bearer {ctx.tokens[ctx.last_actor]}"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["denial"]["code"] == code
-```
-
-The `ctx` fixture is a plain class you build in `conftest.py` — it carries per-scenario state (created users, tokens, last response). Use **function scope** for `ctx` so scenarios don't bleed state.
+**See the shipped step defs:** [`/backend/tests/step_defs/test_membership.py`](../../backend/tests/step_defs/test_membership.py) — one-line summary: the canonical mapping between the Gherkin `Given/When/Then` and the SQL + RLS assertions. Phase 6 adds copilot-specific step defs and the `infer:low-confidence` scenario in the same file (the BDD lives next to the seed fixture so the dataset and assertions cannot drift).
 
 ## Step 6: Per-test isolation (rollback vs truncate)
 
@@ -318,22 +164,7 @@ Real network calls to Mistral / NVIDIA NIM belong in **adapter smoke tests** und
 
 ## Step 8: What CI should run
 
-```yaml
-# .github/workflows/test.yml (illustrative)
-- name: BDD + unit tests
-  run: docker compose -f docker-compose.test.yml up -d db  # only the DB, not the full stack
-  env:
-    RUN_AI_SMOKE: "0"      # do not hit Mistral / NVIDIA in CI
-- name: pytest
-  run: |
-    uv run pytest -q \
-      tests/features tests/unit tests/e2e \
-      --cov=app/domain --cov=app/application --cov=app/infrastructure \
-      --cov-fail-under=80
-- name: docker compose down
-  if: always()
-  run: docker compose -f docker-compose.test.yml down --remove-orphans
-```
+**See the shipped workflow:** [`.github/workflows/test.yml`](../../.github/workflows/test.yml) — one-line summary: the `backend` job applies every `/db/migrations/*.sql` to the `services.db` container for the role-audit step, then runs `uv run pytest -v` (which spins up its own `pgvector/pgvector:pg18` testcontainer with the real `rw_app_login` and exercises the BDD); the `frontend` job runs `npm install && npm run build`.
 
 CI must have Docker available (testcontainers requires it). On hosts without Docker, run `pytest -q tests/unit --ignore=tests/features` — the unit-only subset skips the container fixture.
 

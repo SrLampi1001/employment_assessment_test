@@ -218,3 +218,57 @@ Single root `.env` (gitignored, holds real values) + `.env.example` (committed, 
 - Phase 2 will add `MISTRAL_API_KEY`, `NVIDIA_API_KEY`, `JWT_SECRET`, `DATABASE_URL` to the same root `.env` (backend reads via `pydantic-settings`; the frontend never sees them).
 - The "no VITE_ prefix leak" rule applies to client-side code only: Vite enforces the `VITE_` prefix at build time for any var that reaches the bundle. Server-side config (DB, API keys, JWT secret) is read by the Python backend, not by Vite.
 - If a client-side env var is ever needed (e.g. `VITE_API_BASE_URL`), it must use the `VITE_` prefix; the `loadEnv` call in `vite.config.ts` will then naturally include it.
+---
+# Seed.json and database name (Human)
+As per the assignment, the database must be named as:
+`db_santiago_sanchez_nakamoto`
+So the code must comply to it.
+
+Additionally, the assignment claims that there must exist a seed.json that isn't normalized.
+Therefore, in this branch `feat/phase-1-db-rls` must be landed the seed.json file to comply with the assignment, additionally, and as per §9 in Architecture:
+- Create a script with python to normalize the information in the script and populate the database (a dev startup script only, for empty docker volumes)
+This way, the seed.json will be the "bronze" representation from the medallion layering, and serve as populating layer for development environment (if the project reaches production, the seed mustn't be shipped along)
+
+The AI Agent is responsible for determining if my understanding of the medallion layering is out of scope with the presented proposal to use the seed.json file, and it only complies with the assignment and doesn't have anything to do. 
+The changes must land in the same PR #11.
+
+---
+
+## Seed.json + DB name compliance (AI-assistant)
+
+The Human section above establishes two required changes: rename the database to `db_santiago_sanchez_nakamoto` (per the assignment brief) and ship a denormalized `seed.json` plus a Python loader that implements the Bronze → Silver layering from `ARCHITECTURE.md §9`. This section records the file-format decisions and the compliance with the policy in PR #11.
+
+### Decisions
+
+1. **Seed data lives at [`/db/seed/seed.json`](../../db/seed/seed.json)** — denormalized Bronze corpus. One file, three users (Camila, Valentina, Andrés — mix of ES/EN), two channels (1 direct + 1 group), 30 messages (20 ES/EN mix in `team-1`, 10 ES in `Camila-private`). The shape is human-readable: each channel carries its members and messages inline; usernames (not UUIDs) link them.
+2. **Loader lives at [`/backend/scripts/seed.py`](../../backend/scripts/seed.py)** — Python (not SQL), single file, no external deps beyond `psycopg` and `argon2-cffi` (both already in `pyproject.toml`). The loader is a Python module, not a SQL function, because: (a) it has to hash passwords with argon2id before insert, and (b) it's dev-only and intentionally not granted to `rw_app`.
+3. **Bronze staging table is a separate migration [`/db/migrations/0090_bronze_staging.sql`](../../db/migrations/0090_bronze_staging.sql)** — `stg_seed_message(rw_id bigserial, rw_payload jsonb, rw_loaded_at timestamptz)`. The whole payload lands as one jsonb row per load (the `before` evidence for the 1FN→3FN write-up, per `ARCHITECTURE.md §9`).
+4. **Database name lives in two places**: `docker-compose.yml` (default `db_santiago_sanchez_nakamoto`), `.env` + `.env.example` (`POSTGRES_DB`). The CI workflow uses a separate name (`db_santiago_sanchez_nakamoto_test`) so the test service doesn't collide with a dev DB on a shared host.
+
+### Compliance in PR #11
+
+- **`docker-compose.yml`, `.env`, `.env.example`** — `POSTGRES_DB` is `db_santiago_sanchez_nakamoto`.
+- **`.github/workflows/test.yml`** — the `db` service uses `POSTGRES_DB: db_santiago_sanchez_nakamoto_test` (separate from dev).
+- **`/db/seed/seed.json`** — committed. 3 users, 2 channels, 30 messages, ES/EN mix.
+- **`/backend/scripts/seed.py`** — Bronze → Silver loader: TRUNCATEs `stg_seed_message`, inserts the full payload as jsonb (Bronze), TRUNCATEs the `rw_*` tables, then INSERTs users / channels / memberships / messages (Silver). Idempotent. Maps human-readable `kind: "direct"/"group"` to smallint 1/2; hashes passwords with argon2id before writing to `rw_auth_credential`.
+- **`/backend/scripts/seed.py`** connects as the superuser (`postgres`) via `SEED_DATABASE_URL`, **not** as `rw_app_login`. Reason: the loader needs `TRUNCATE` on `stg_seed_message`, which is intentionally NOT granted to `rw_app` (Bronze is a dev-only artifact).
+- **`/backend/tests/unit/scripts/test_seed.py`** — 8 unit tests against the pgvector testcontainer: counts, Bronze + Silver integrity, channel-kind mapping, idempotency, **RLS integrity** (Valentina still can't see Camila-private after a fresh load), direct-channel invariant (exactly 2 members), malformed-payload validation.
+
+### What the dev workflow looks like now
+
+```bash
+# Fresh start (empty docker volume):
+docker compose up -d                                  # spins up the pgvector container
+docker compose exec -T db psql -U postgres -d db_santiago_sanchez_nakamoto \
+    < db/migrations/0090_bronze_staging.sql           # one-time Bronze setup
+./backend/.venv/bin/python backend/scripts/seed.py   # Bronze → Silver
+
+# Or, as docker-compose services (Phase 7 wires this in):
+docker compose run --rm migrate    # applies all migrations
+docker compose run --rm seed       # runs the loader
+```
+
+### What's intentionally NOT shipped
+
+- The loader is **not** wired into `docker-compose.yml` as a service yet — Phase 7 (`/docker-compose.yml` with `migrate` + `seed` services) is where that lands. For Phase 1 the loader is a one-shot script the developer runs by hand.
+- The loader is **dev-only**. Production loads (corp data, customer data) would use a separate ETL job with a role that has been granted `TRUNCATE` on `stg_seed_message`; the script's default DSN points at the dev DB only.
