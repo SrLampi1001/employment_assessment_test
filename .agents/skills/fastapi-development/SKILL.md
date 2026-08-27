@@ -28,6 +28,8 @@ python -c "import importlib.metadata as m; print('fastapi', m.version('fastapi')
 
 If installed versions are >2 minor behind the latest stable, scan [`fastapi.tiangolo.com/release-notes`](https://fastapi.tiangolo.com/release-notes/) for `Breaking Changes` between the installed and the latest. Same for [Pydantic](https://docs.pydantic.dev/latest/migration/) and [psycopg 3](https://www.psycopg.org/psycopg3/docs/).
 
+**Last verified:** fastapi 0.141.1, pydantic 2.13.4, pydantic-settings 2.15.0, pyjwt 2.13.0, argon2-cffi 25.1.0, psycopg 3.2.x. Pinned via [`/backend/pyproject.toml`](../../backend/pyproject.toml) — confirm against `uv.lock` before relying on this snapshot.
+
 ## Step 2: Project baseline (versions + tooling)
 
 These are the contract from `ARCHITECTURE.md §12`. Don't drift without a deliberate upgrade PR.
@@ -54,28 +56,17 @@ Use modern Python typing throughout: `str | None` not `Optional[str]`, `list[str
 
 ## Step 3: Project layout — Clean Architecture
 
-Per `ARCHITECTURE.md §5.2`. Backend code lives under `/backend/app/`, split by **layer**, not by route:
+Per `ARCHITECTURE.md §5.2`. Backend code lives under `/backend/app/`, split by **layer**, not by route. The shipped layout is intentionally flat for Phase 2 (single-file layers per concern) and grows into a nested layout as new features land:
 
 ```text
 backend/app/
-├── domain/          # pure Python, NO FastAPI, NO psycopg, NO pydantic-settings
-│   ├── entities/    # dataclasses / Pydantic models without I/O
-│   ├── ports/       # Protocols: UserRepo, MessageRepo, ChannelRepo,
-│   │                #           EmbeddingProvider, ChatProvider, TokenService, UnitOfWork
-│   └── errors.py    # domain-level exceptions (ResourceNotFound, PermissionDenied, …)
-├── application/     # use cases (commands + queries), one folder per feature
-│   ├── auth/        # RegisterUser, Login, Refresh
-│   ├── channels/    # CreateChannel, AddMember, ListVisibleChannels
-│   ├── messages/    # SendMessage, EditMessage, DeleteMessage, ChannelHistory, SearchMessages
-│   └── copilot/     # AskCopilot, CopilotUsage
-├── infrastructure/  # adapters that implement the domain ports
-│   ├── db/          # psycopg 3 repositories + RwSession + actor propagation
-│   ├── auth/        # JwtService, Argon2Hasher, refresh rotation
-│   └── ai/          # MistralAdapter, NvidiaAdapter
-└── delivery/        # FastAPI wiring (the only layer that imports FastAPI)
-    ├── http/
-    │   ├── auth.py channels.py messages.py copilot.py
-    └── middleware.py
+├── __init__.py
+├── config.py        # Settings (JWT secret + TTLs + DB URL)
+├── domain.py        # entities (User, RefreshTokenRecord) + ports (Protocols)
+├── auth.py          # RegisterUser, Login, Refresh use cases + TokenPair + AuthError
+├── infrastructure.py # Argon2idHasher, PyJwtService, RwSession, Postgres* adapters
+├── delivery.py      # JwtAuthMiddleware + /api/v1/auth + /api/v1/me routes
+└── main.py          # create_app(settings=..., session_factory=...)
 ```
 
 Dependency rule (enforced by code review until a linter rule exists):
@@ -85,29 +76,39 @@ Dependency rule (enforced by code review until a linter rule exists):
 - **Infrastructure** depends on Domain (implements the ports). Adapters live here, not in `delivery/`.
 - **Delivery** depends on Application + Domain (wires FastAPI routers to use cases). Never calls repos directly.
 
+As Phase 3+ lands (channels, messages, copilot), the flat layout grows into the per-feature nested layout documented in the predictive block below — kept as a template, not as the shipped structure.
+
+```text
+backend/app/   # predictive — Phase 3+ expands into:
+├── domain/
+│   ├── entities/    # dataclasses / Pydantic models without I/O
+│   ├── ports/       # Protocols: UserRepo, MessageRepo, ChannelRepo,
+│   │                #           EmbeddingProvider, ChatProvider, TokenService, UnitOfWork
+│   └── errors.py    # domain-level exceptions (ResourceNotFound, PermissionDenied, …)
+├── application/     # use cases (commands + queries), one folder per feature
+│   ├── auth/        # RegisterUser, Login, Refresh — SHIPPED in app/auth.py
+│   ├── channels/    # CreateChannel, AddMember, ListVisibleChannels
+│   ├── messages/    # SendMessage, EditMessage, DeleteMessage, ChannelHistory, SearchMessages
+│   └── copilot/     # AskCopilot, CopilotUsage
+├── infrastructure/  # adapters that implement the domain ports — SHIPPED as app/infrastructure.py
+│   ├── db/          # psycopg 3 repositories + RwSession + actor propagation
+│   ├── auth/        # JwtService, Argon2Hasher, refresh rotation
+│   └── ai/          # MistralAdapter, NvidiaAdapter
+└── delivery/        # FastAPI wiring (the only layer that imports FastAPI) — SHIPPED as app/delivery.py
+    ├── http/
+    │   ├── auth.py channels.py messages.py copilot.py
+    └── middleware.py
+```
+
 ## Step 4: Project-specific patterns
 
 ### 4.1 RLS-aware database sessions (the security boundary)
 
 Every request opens **one** psycopg transaction, sets the actor via `SET LOCAL`, and runs every query inside it — including the copilot's vector search. The DB is the single security boundary (`ARCHITECTURE.md §3`); the backend is a thin dispatcher.
 
-```python
-# infrastructure/db/session.py
-from contextlib import asynccontextmanager
-import uuid
-from psycopg_pool import AsyncConnectionPool
+See [`/backend/app/infrastructure.py`](../../backend/app/infrastructure.py) — `RwSession` is a sync `__enter__/__exit__` context manager (not async — Phase 2 keeps the simple `psycopg.Connection` shape; Phase 7 swaps to `psycopg_pool.AsyncConnectionPool`). It calls `set_config('app.current_user_id', %s, true)` on entry and commits or rolls back on exit.
 
-@asynccontextmanager
-async def rw_session(pool: AsyncConnectionPool, actor_id: uuid.UUID):
-    async with pool.connection() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.current_user_id', %s, true)", str(actor_id)
-            )
-            yield conn
-```
-
-Use cases never see the connection pool — they receive a `UnitOfWork` port injected via the use-case constructor (DI). Repositories take a `RwSession`, not a raw connection, so the actor is always set.
+Use cases never see the connection pool — they receive a `SessionFactory` callable injected via the use-case constructor (DI). Repositories take a `psycopg.Connection` and the use case constructs an adapter (`PostgresUserRepository(conn)`) inside the `RwSession` block so the actor is always set.
 
 Forbidden (from `AGENTS.md`):
 
@@ -119,16 +120,18 @@ Forbidden (from `AGENTS.md`):
 
 ### 4.2 JWT + refresh-rotation middleware
 
-`infrastructure/auth/` implements three ports: `JwtService`, `PasswordHasher`, `RefreshTokenStore`. The `RwAuthMiddleware`:
+See [`/backend/app/delivery.py`](../../backend/app/delivery.py) (`JwtAuthMiddleware`) and [`/backend/app/auth.py`](../../backend/app/auth.py) (`Refresh` use case). Summary of the shipped behavior:
 
-1. Reads `Authorization: Bearer <jwt>`.
-2. Decodes + verifies with `JwtService.decode_access`. On failure: `401`.
+1. `JwtAuthMiddleware` reads `Authorization: Bearer <jwt>`.
+2. Decodes + verifies with `PyJwtService.decode_access` (PyJWT HS256). On PyJWT error: leaves `request.state.actor_id = None` — the route's `Depends(get_current_actor)` enforces 401.
 3. Sets `request.state.actor_id` (a `uuid.UUID`, not a string).
-4. For `/auth/refresh`: validates the refresh token, marks it revoked, issues a new pair, stores the new token hash under the same `rw_family_id`.
+4. `Refresh` use case validates the presented refresh token (hashed SHA-256 of the plaintext, looked up in `rw_refresh_token`). On happy path: revoke the old row, insert a new row under the **same** `rw_family_id`. On reuse (token already revoked): one SQL `UPDATE … WHERE rw_family_id = %s` revokes every remaining row in the family.
+
+The reuse-detection path MUST `conn.commit()` **before** raising `AuthError` — otherwise `RwSession.__exit__` rolls back the security write and the family stays open. Covered by the BDD scenario in [`/backend/tests/features/auth.feature`](../../backend/tests/features/auth.feature) (`Reusing a revoked refresh token revokes the entire family`) and the unit test `test_reuse_detection_revokes_entire_family` in `tests/unit/application/auth/test_use_cases.py`.
 
 Refresh tokens are stored **hashed** in `rw_refresh_token` with `rw_family_id`. Presenting an already-revoked token revokes the **whole family** (reuse/theft detection) — see [Auth0 docs](https://auth0.com/docs/secure/tokens/refresh-tokens/refresh-token-rotation).
 
-**Never** accept `user_id`, `actor_id`, or anything similar from a JSON body. The only acceptable sources are (a) the JWT `sub`, (b) server-issued path parameters derived from a row the actor can already see.
+**Never** accept `user_id`, `actor_id`, or anything similar from a JSON body. The only acceptable sources are (a) the JWT `sub`, (b) server-issued path parameters derived from a row the actor can already see. The unit test `test_access_jwt_carries_sub_only` enforces this in code (asserts no `role` / `channel_ids` / `permissions` claims are present in the issued JWT).
 
 ### 4.3 AI providers as ports (the `copilot` module)
 
