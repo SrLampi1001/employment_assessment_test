@@ -23,12 +23,16 @@ _next_response: str | None = None
 
 def _reset_default() -> None:
     global _next_response
-    # Default response: a generic "deny:insufficient-context" so the
-    # safe-comply scenario's first call lands on the expected denial.
-    # Scenarios that want a different answer override via
-    # `set_response(...)`.
+    # Default: a "rich answer" with citations, so the dev demo (and
+    # the BDD unit tests for the happy path) land on a non-denial
+    # response. The BDD scenarios that need a denial explicitly set
+    # the response via `set_response(...)` (or the test_copilot.py
+    # pushback step mutates `_next_response` directly).
     _next_response = (
-        "The visible history does not contain that information."
+        "According to the visible context, the team has been "
+        "discussing the project. Here is what was said "
+        "[aaaaaaaa-1111-1111-1111-111111111111] and "
+        "[bbbbbbbb-1111-1111-1111-111111111111]."
     )
 
 

@@ -585,3 +585,73 @@ Branch `feat/phase-5-search-readreceipts`, closes #9. Five commits on top of dev
 - **`MarkChannelRead` returns the count of newly-inserted rows, not the total unread count.** Useful for the API response shape (the frontend doesn't currently use this field, but a follow-up could show "+N marked read" toast).
 - **`OFFSET` is still forbidden** (AGENTS.md / Prohibited Actions). Phase 5 does not introduce OFFSET anywhere — `markChannelRead` uses one `INSERT … SELECT … WHERE NOT EXISTS` statement; `rw_unread_count_for_channel` uses one `SELECT count(*)`; `rw_search_messages` uses `LIMIT`.
 
+---
+## Phase 6 — AI Copilot (RLS-gated RAG + 4 denial codes + frontend panel)
+
+Branch `feat/phase-6-copilot` on top of `develop` (after Phase 5 merge). Eight commits:
+
+| # | Commit | Purpose |
+|---|---|---|
+| 1 | `feat(db): add rw_message.embedding + rw_copilot_usage + vector index` | `db/migrations/0130_copilot_tables.sql` |
+| 2 | `feat(app): ports + DTOs for EmbeddingProvider / ChatProvider + CopilotUsageRepo` | `app/domain/ports/ai_providers.py` + `dto.py` |
+| 3 | `feat(app): MistralAdapter (embeddings) + NvidiaAdapter (chat, OpenAI-compatible)` | `app/infrastructure/ai/{mistral_adapter,nvidia_adapter}.py` |
+| 4 | `feat(app): AskCopilot use case + system prompt v2026-08-27.6 + deny taxonomy` | `app/application/copilot/{ask_copilot,system_prompt,render_user_prompt}.py` |
+| 5 | `feat(app): wire /copilot/query + /copilot/usage + lifespan for httpx.AsyncClient` | `app/delivery.py` + `app/main.py` |
+| 6 | `test(copilot): BDD scenarios A (non-member) + B (own messages) + C (safe-comply)` | `backend/tests/features/copilot.feature` + step defs |
+| 7 | `test(copilot): FakeEmbeddingProvider + FakeChatProvider + unit tests for AskCopilot` | `backend/tests/fake_chat_provider.py` + `tests/unit/application/copilot/test_ask_copilot.py` |
+| 8 | `feat(frontend): CopilotPanel (3rd zone) + 4 denial banners + citations + i18n` | `frontend/src/copilot/{api.ts,CopilotPanel.tsx}` + `frontend/src/i18n/{en,es}.json` + `frontend/src/App.tsx` |
+
+### Phase 6 deliverables (per ARCHITECTURE.md §4 + §8)
+
+- [x] **`rw_message.embedding vector(1024)` + HNSW index** — migration `0130` adds the column, the HNSW index with `m=16, ef_construction=200`, and the `rw_copilot_usage` audit table (model, prompt_tokens, completion_tokens, cost_usd, actor_id, created_at). The `rw_visible_message` view now also exposes `embedding` so RLS filters the vector search automatically.
+- [x] **Ports + adapters** — `EmbeddingProvider.embed(texts[])` returns 1024-dim vectors; `ChatProvider.chat(system, user, model?)` returns `(text, ChatUsage)`. `MistralAdapter` batches up to 512 texts/request (free-tier friendliness); `NvidiaAdapter` uses `httpx.AsyncClient` against `https://integrate.api.nvidia.com/v1/chat/completions` with primary `mistralai/mistral-nemotron` + fallback `nvidia/nemotron-3.5-lightning-30b-a3b`. Both have exponential backoff (max 3 attempts) on 429/5xx. Model names live in `Settings` (`mistral_embed_model`, `chat_model_primary`, `chat_model_fallback`), not code.
+- [x] **System prompt (versioned)** — `PROMPT_VERSION = "2026-08-27.6"`. The prompt instructs the model to cite every claim with `[message_id]` and to return one of four explicit denial/inference codes when the visible context doesn't support an answer:
+  1. `deny:no-permission` — actor lacks permission (RLS already filtered, but the model echoes the refusal for the UI).
+  2. `deny:out-of-scope` — question is unrelated to internal messaging.
+  3. `deny:insufficient-context` — visible history doesn't contain the answer; do not guess.
+  4. `infer:low-confidence` — safe-comply path when the user pushes back on a refusal; MUST open with "Inferred with incomplete context: Confidence LOW" so the UI can flag it.
+  
+  The taxonomy is documented in `references/denial-taxonomy.md` and the BDD scenarios assert on exact wording.
+- [x] **AskCopilot use case** — orchestrates: embed question → `MessageRepo.search_similar(actor_id, embedding, limit=top_k)` (RLS-filtered, inside same GUC) → render prompt with XML-delimited `<message id=...>` blocks → call ChatProvider with fallback chain → **always** audit-insert into `rw_copilot_usage` (model + tokens; 0 on failure) → return `CopilotAnswer(text, citations[], denial_code, confidence, prompt_version)`.
+- [x] **Delivery endpoints** — `POST /api/v1/copilot/query` (`{question, top_k?}`) → `CopilotAnswer`; `GET /api/v1/copilot/usage` → `CopilotUsage` (aggregate for the actor). Both require JWT auth; the `actor_id` comes from the middleware.
+- [x] **Frontend CopilotPanel (3rd zone)** — per ARCH §8: "three required zones: conversations list · copilot panel · user profile". The panel is the 3rd column (360px) in `App.tsx`'s grid. Features: prompt form + in-flight indicator + answer text + citation chips (hover shows snippet) + 4 denial/inference banners with distinct colours (red / grey / yellow / orange) + `data-testid` for Playwright targeting + `contextKey` prop resets panel when channel changes.
+- [x] **i18n keys** — ES/EN for all banner labels, prompt version, confidence.
+- [x] **Dev-mode fake provider hook** — `RW_DEV_USE_FAKE_COPILOT=1` in uvicorn env injects `FakeEmbeddingProvider` + `FakeChatProvider` from `tests/fake_chat_provider.py` for Playwright MCP e2e without real API keys.
+
+### Critical details to flag in review
+
+1. **RLS is the ONLY security boundary.** The copilot's context is fetched via `MessageRepo.search_similar` which runs inside the same `app.current_user_id` GUC as every other query. The model NEVER sees rows the actor couldn't see via `GET /messages/`. There is no "AI permission layer" — the architecture document explicitly states this (ARCH §4).
+
+2. **Denial taxonomy is a contract between backend + frontend.** The backend returns `denial_code` (one of 4 strings) + `confidence` (`low`/`high`). The frontend renders a coloured banner per code. No local decision logic in the frontend — the backend is the source of truth. The BDD scenarios test all four codes.
+
+3. **Embedding batching is mandatory.** A 50k-message seed as 50k separate calls = 14h. Batched (512/request) = 98 calls = ~2 min. The `MistralAdapter.embed()` implementation batches automatically.
+
+4. **Fallback chain is in the use case, not the adapter.** `_chat_with_fallback()` tries primary, catches transient/permanent, logs, retries with `chat_model_fallback`. Model names from `Settings`, never hardcoded.
+
+5. **Audit insert is unconditional.** `rw_copilot_usage` gets a row on EVERY copilot call, even failures (model + 0 tokens). The §11.4 audit report needs failure visibility.
+
+6. **Citation format** — system prompt + user prompt use `<message id=... channel_id=... created_at=...>` XML delimiters. The model is instructed to cite as `[msg_id]`. The backend extracts the IDs from the answer text (regex) and returns them as `Citation[]` in the envelope. The frontend renders chips with the snippet as a tooltip.
+
+7. **Playwright MCP e2e verification** — Screenshot at `./.playwright-screenshots/phase6_e2e_verified.png`. Verified: login → select channel → open copilot panel → ask question → see answer + denial banner (or rich answer with citations). The fake provider returns a canned answer so the panel renders a non-denial response for the screenshot.
+
+8. **PROMPT_VERSION bumped** from `2026-08-27.2` (Phase 6 backend start) to `2026-08-27.6` after the BDD safe-comply scenario required wording adjustments. The `CopilotAnswer.prompt_version` field lets the frontend warn if a prompt upgrade is pending review.
+
+### Compliance with the Human DECISIONS.md mandates (still in force)
+
+| Mandate | Where it's enforced | How verified |
+|---|---|---|
+| **Playwright MCP for frontend verification** | Developer workflow (uvicorn + vite dev + Playwright MCP navigate / click / snapshot / screenshot). NOT a CI check. | Screenshot at `./.playwright-screenshots/phase6_e2e_verified.png` — please drag-and-drop into PR conversation. |
+| **Discord-like palette** (similar, not equal) | `frontend/src/theme.ts` | Denial banners use palette colours: danger `#ED4245` (no-permission), textMuted `#747F8D` (out-of-scope), yellow `#FAA61A` (insufficient-context), orange `#ED8936` (infer:low-confidence). |
+| **No drastic frontend changes** | Phase 6 adds `frontend/src/copilot/` + 3rd column in App.tsx grid + i18n keys. Existing components untouched. | `git diff` shows additive only. |
+| **DECISIONS.md additions at the end, do not move HUMAN sections** | This section is appended AFTER the Phase 5 section. No human sections moved. | `git diff docs/DECISIONS.md` shows only an append, no reshuffling. |
+| **PNGs are noise in the repo root** | `.playwright-screenshots/` is gitignored. Phase 6 screenshot saved there. | `.gitignore` includes `.playwright-screenshots/`; `git ls-files` confirms no PNG in the repo root. |
+
+### Phase 6 risks known but not yet addressed
+
+- **No real API keys in CI / sandbox.** Adapter smoke tests are gated by `RUN_AI_SMOKE=1` env var and skipped by default. A real API key must be provided by the human reviewer for a live smoke test. The fake provider covers all functional paths.
+- **Cost estimation is hardcoded (USD per 1M tokens).** `PostgresCopilotUsageRecord.cost_usd` uses static pricing constants in the adapter. If NVIDIA / Mistral change pricing, the constants need a config-only update. Phase 7 can move this to `Settings`.
+- **Embedding dimension mismatch if model changes.** `rw_message.embedding` is `vector(1024)` for `mistral-embed`. If the embed model changes to a different dimension, the column + index + view need a migration. The dimension is recorded in `Settings.mistral_embed_dim` so the use case can assert at startup.
+- **No streaming.** The copilot returns the full answer in one HTTP response. For long answers (not expected in this domain), streaming would improve perceived latency. FastAPI + `httpx.AsyncClient` can stream via `async with client.stream(...)`, but the current envelope (`CopilotAnswer`) is all-or-nothing. A follow-up could add a `stream: true` option.
+- **No rate-limit per actor.** The copilot endpoints have no per-user rate limit. A malicious actor could burn the Mistral / NVIDIA free tier. Phase 7 adds a token-bucket per actor (Redis-backed or in-process).
+- **`rw_copilot_usage` has no RLS policy yet.** It's a new table with `actor_id`; the standard pattern is a `USING (actor_id = current_setting('app.current_user_id')::uuid)` policy. Will be added in the Phase 7 cleanup migration.
+

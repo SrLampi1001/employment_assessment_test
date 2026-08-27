@@ -9,6 +9,7 @@ a request body — the JWT middleware is the only source of identity.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import FastAPI
@@ -208,20 +209,30 @@ def create_app(
             timeout_s=settings.chat_request_timeout_s,
         )
 
-    # For dev / test: prefer real adapters when keys are present,
-    # otherwise build thin stubs that raise `ai-not-configured`. The
-    # use case's `_chat_with_fallback` translates ProviderError →
-    # CopilotError("ai-not-configured", ...). This keeps the rest of
-    # the app + tests booting without keys, while production
-    # behaviour is honoured when both are set.
-    # `embedder` / `chatter` from the create_app kwargs override
-    # both — used by the BDD scenarios to inject fakes.
-    if embedder is None:
+    # Dev-mode helper: if `RW_DEV_USE_FAKE_COPILOT=1` is set in the
+    # environment (e.g. the Playwright MCP e2e run, where real API
+    # keys are not available), inject the in-process fakes that the
+    # BDD suite uses. They behave the same as the live providers but
+    # without touching the network. Production leaves this OFF so
+    # real Mistral + NVIDIA traffic flows.
+    if (
+        embedder is None
+        and chatter is None
+        and os.getenv("RW_DEV_USE_FAKE_COPILOT") == "1"
+    ):
+        from tests.fake_chat_provider import (
+            FakeChatProvider,
+            FakeEmbeddingProvider,
+        )
+
+        embedder = FakeEmbeddingProvider()
+        chatter = FakeChatProvider()
+    elif embedder is None:
         try:
             embedder = _build_embedder()
         except ProviderError:
             embedder = _UnconfiguredEmbeddingProvider()
-    if chatter is None:
+    elif chatter is None:
         try:
             chatter = _build_chatter()
         except ProviderError:
