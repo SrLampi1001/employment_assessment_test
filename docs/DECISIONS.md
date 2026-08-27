@@ -82,3 +82,96 @@ The Bioma reference (`/home/cohorte5/Descargas/ARCHITECTURE.md`) targets a wildl
 - `react-infinite-scroll-component` (React 19 compatible, ~4 kB): <https://www.npmjs.com/package/react-infinite-scroll-component>
 
 ---
+
+## Skills creation (Human)
+The use of AI agents during multiple sessions can create gaps in the context that will allow the agent to hallucinate and fall back into default behaviors that aren't fit for this project development.
+
+The skills to add are:
+- **react-typescript-modern**: This is a generic AI created skill (Claude) for modern react 19 with typescript development, most modern AIs default to react 16/18.
+A change required for this skill is to include internationalization, a requirement for the assignment, with Required Spanish and English support.
+
+- **fastapi-development**: This is a generic AI created skill (Clause) for the modern FastAPI development practices. 
+
+The skills need to be optimized for this project specific context and new skills shall be added as per the AI agent recommendation. 
+
+---
+
+## Skills customization and additions (AI-assistant)
+
+The Human section above established the rationale. This section records the specific changes applied to the `.agents/skills/` directory in this branch (`docs/agents-skills-for-project-development`) — what was customized, what was added, and why each skill complies with the project's source of truth.
+
+### Skills touched (customized in this branch)
+
+| Skill | Change | Compliance with project |
+|---|---|---|
+| `react-typescript-modern` | Generalized to a project-agnostic React 19.2+ / React Router v8 / TanStack Query v5 / TypeScript 7.x / Vite 7.x skill. Added a "check the project before assuming latest" ground rule so the skill defers to project pins (e.g. `rw_locale` ES/EN, `react-i18next`). Added an honest caveat about the `typescript-eslint` peer-dep cap (TS `<6.1.0`) so the linter risk is visible before any CI lint job is added. | Complies with [`ARCHITECTURE.md §8 + §12`](../ARCHITECTURE.md) (three zones, ES/EN i18n, lazy keyset history, React 19, Vite, react-i18next). The i18n gap flagged by the Human section above is left to a follow-up: the React skill is generic, the i18n wiring lives in the project. |
+| `fastapi-development` | Customized for this project's backend. Rewrote `SKILL.md` to inline Riwi Co. conventions (Python 3.13, FastAPI 0.12x, psycopg 3, Pydantic v2, Clean Architecture layer rule, RLS-aware sessions, JWT + refresh rotation, provider ports for AI). Created the missing `references/deprecated-patterns.md` (FastAPI/Pydantic/psycopg deprecations + 18 project-banned patterns). Kept the existing generic `references/modern-patterns.md`. | Complies with [`ARCHITECTURE.md §5 + §7`](../ARCHITECTURE.md) and the prohibited-actions list in [`AGENTS.md`](../AGENTS.md) (no `BYPASSRLS`, no SQL concatenation, no physical message delete, no `OFFSET`, no user-id-from-body). |
+
+### Skills added (new in this branch)
+
+Three skills were added because none existed and the project's source of truth made them required:
+
+| Skill | Why added | Compliance with project |
+|---|---|---|
+| `postgresql-rls-pgvector` | The platform's confidentiality guarantee is enforced by RLS, not the application. The DB is the single security boundary (`ARCHITECTURE.md §3`). Without a dedicated skill, AI agents default to writing SQL/ORM code that ignores RLS, hardcodes the actor into queries, or bypasses the GUC pattern. This skill is the executable source of truth for `rw_*` DDL, RLS policies, pgvector HNSW, keyset pagination, partial unique indexes, and medallion seeding. | Complies with [`ARCHITECTURE.md §2 + §3 + §9`](../ARCHITECTURE.md) and the prohibited-actions list in [`AGENTS.md`](../AGENTS.md). |
+| `ai-provider-integration` | The copilot's correctness depends on three things that are easy to get wrong: the `EmbeddingProvider` / `ChatProvider` ports (so the model name is config not code), the versioned system prompt (so the audit row can bisect), and the `rw_copilot_usage` audit insert (so token / cost are always recorded). Without a dedicated skill, AI agents call SDKs directly from use cases and skip the audit row. | Complies with [`ARCHITECTURE.md §4 + §5.2`](../ARCHITECTURE.md) and the provider selection in [`DECISIONS.md`](./DECISIONS.md) (Mistral `mistral-embed` + NVIDIA NIM `mistralai/mistral-nemotron` primary with `nvidia/nemotron-3.5-lightning-30b-a3b` fallback). |
+| `pytest-bdd-testcontainers` | The README requires two PostgreSQL tests as executable specifications (e.g. reject non-member access, private channel isolation). Without a dedicated skill, AI agents mock the DB or grant `BYPASSRLS` to the test role — defeating the entire test. This skill pins the `pgvector/pgvector:pg18` image, the `rw_app` (no `BYPASSRLS`) role, the `as_actor` fixture that sets `app.current_user_id` per test, and the two mandatory scenarios from `ARCHITECTURE.md §10`. | Complies with [`ARCHITECTURE.md §10 + §11`](../ARCHITECTURE.md) and the testing requirement in the README. |
+
+### Cross-skill coherence
+
+The skills are not independent. They reference each other and the source-of-truth docs in their `Do NOT use for ...` clauses:
+
+- `fastapi-development` → forwards DB work to `postgresql-rls-pgvector`, AI work to `ai-provider-integration`, and BDD to `pytest-bdd-testcontainers`.
+- `postgresql-rls-pgvector` → forwards Python RLS enforcement to `fastapi-development`, AI retrieval to `ai-provider-integration`, BDD to `pytest-bdd-testcontainers`.
+- `ai-provider-integration` → forwards RLS-filtered retrieval to `postgresql-rls-pgvector`, use-case wiring to `fastapi-development`, end-to-end BDD to `pytest-bdd-testcontainers`.
+- `pytest-bdd-testcontainers` → forwards SQL/RLS to `postgresql-rls-pgvector`, use cases to `fastapi-development`, AI fakes to `ai-provider-integration`.
+
+This is intentional: the loader should route a request to one primary skill, with explicit handoffs to the others. Every cross-reference points back to a project document, never to another skill's internals, so a doc change propagates without skill rewrites.
+
+### How this complies with `AGENTS.md`
+
+- **Mermaid diagrams replace static images / text** — every architecture / workflow diagram in the skills is Mermaid, per the documentation norm.
+- **Skill frontmatter includes a one-line trigger description** — the opencode skill loader requires it; skills without one are filtered out and never surfaced to the model.
+- **No new dependencies or commands added beyond what `ARCHITECTURE.md` already permits** — every CLI command and library reference in the skills is either in the architecture's technology stack table or in `requirements.txt` / `pyproject.toml`.
+- **Conventional-commit-friendly file paths** — `.agents/skills/<name>/SKILL.md` matches the opencode skill loader's expected layout.
+- **No commits to `main`** — this branch is `docs/agents-skills-for-project-development`; the PR targets `develop`.
+
+### Known follow-ups (not in this branch)
+
+- The Human section above flags i18n as a required change to `react-typescript-modern`. The skill is generic by design (so it remains a reusable React 19 skill), so the i18n wiring lives in the project's frontend code — a follow-up `feat(i18n): wire react-i18next` task.
+- A potential `clean-architecture-python` skill was considered (the layer rule is currently inlined in `fastapi-development` §3). Deferred to avoid duplication until a second project adopts the same layer rule.
+
+---
+
+## PR #1 review iteration (AI-assistant)
+
+Six review comments were left on PR #1. All six are resolved in this branch (the same PR), per the rule that the version-mismatch follow-up "must land in the same PR" and the broader principle that no review comment is left open at merge time.
+
+### 1. Version snapshot: TypeScript 7 + Vite 7 vs the architecture's TS 5.7+ / Vite 8 (resolved)
+
+**Resolution:** skill takes priority. `ARCHITECTURE.md §12` was updated to **React 19.2 + TypeScript 7.x + Vite 7.x**. The React skill now carries an honest caveat that the real blocker is **`typescript-eslint`** (peer dep `>=4.8.4 <6.1.0`), not Vite — verified against [typescript-eslint#12518](https://github.com/typescript-eslint/typescript-eslint/issues/12518). Vite 8 builds fine with TS 7; `npm run lint` is what fails. If/when the team adds ESLint to the frontend, the pin may need to drop to TS 6.x until `typescript-eslint` catches up — the CI workflow decision will surface this.
+
+Verification sources used:
+
+- Vite 8 release announcement — March 2026, supports TS 7 in bundling ([vite.dev/blog/announcing-vite8](https://vite.dev/blog/announcing-vite8)).
+- TypeScript 7.0 announcement — native Go compiler, ships a 6.0-API re-export ([devblogs.microsoft.com/typescript/announcing-typescript-7-0](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/)).
+- typescript-eslint#12518 — closed as not planned, peer dep still `<6.1.0`, lint crashes on TS 7.
+- Discussion: vitejs/vite#22904 — "treat TS 7 as usable only after [the typescript-aware tool] project-level check" passes.
+
+### 2. Code blocks in SKILL.md files are predictive, not source of truth (resolved as a meta-rule)
+
+**Resolution:** the existing SKILL.md files keep their illustrative code blocks in this PR (they describe the *shape* the AI should produce and are useful during the green-field phase), but a **Skill Maintenance** clause was added to `AGENTS.md` that requires every shipped feature to be followed by a `chore:` commit that replaces the predictive code block with a reference to the actual file. Examples that are descriptive / generic stay; feature-specific code that mirrors shipped functionality gets replaced. The rule applies to all five skills touched in this PR.
+
+This keeps skills from going stale: when the AI drifts to its own code examples instead of the real code, the rule surfaces in code review.
+
+### 3. `infer:low-confidence` denial code + BDD scenario (resolved)
+
+**Resolution:** the copilot denial taxonomy now has a fourth response code, `infer:low-confidence`, for the safe-comply path when the user pushes back on a `deny:insufficient-context` refusal. The model's behavior is bound by a Gherkin scenario added to `references/denial-taxonomy.md` (alongside the two security scenarios from `ARCHITECTURE.md §10`), and the system prompt in `ai-provider-integration/SKILL.md` was bumped (PROMPT_VERSION `2026-08-27.1` → `2026-08-27.2`) with the literal `"Inferred with incomplete context: Confidence LOW"` marker the UI renders verbatim.
+
+The marker is the *only* signal that distinguishes an inferred answer from a real one. Without it, a hallucination and a low-confidence inference look identical on the wire — both pollute the actor's mental model of what the copilot knows.
+
+### 4. "Cineteca never shipped" reference removed from DECISIONS.md (resolved)
+
+**Resolution:** the previous version of this file referenced the removed Cineteca content in the React skill row. That reference was unnecessary — there is no Cineteca commit in this repo's history, so future readers waste cycles looking for it. The row is now phrased generically ("Generalized to a project-agnostic skill …") so the change is described without naming content that was never here.
+
+---
