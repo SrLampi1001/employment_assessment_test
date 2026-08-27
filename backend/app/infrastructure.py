@@ -821,7 +821,10 @@ class MistralAdapter(EmbeddingProvider):
             )
         # Imported lazily so the SDK isn't required for unit tests
         # that pass FakeEmbeddingProvider.
-        from mistralai import Mistral  # type: ignore[import-not-found]
+        try:
+            from mistralai import Mistral  # type: ignore[import-not-found]
+        except ImportError:
+            from mistralai.client import Mistral  # type: ignore[import-not-found]
 
         self._client = Mistral(api_key=api_key)
         self._model = model
