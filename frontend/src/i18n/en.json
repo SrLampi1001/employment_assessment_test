@@ -51,5 +51,19 @@
     "search_results_title_plural": "{{count}} matches",
     "search_clear": "Clear",
     "search_loading": "Searching…"
+  },
+  "copilot": {
+    "title": "AI Copilot",
+    "empty": "Ask anything about your visible messages.",
+    "placeholder": "Ask the copilot…",
+    "ask": "Ask",
+    "thinking": "Thinking…",
+    "error": "Error",
+    "deny_no_permission": "You do not have access to messages about this topic.",
+    "deny_out_of_scope": "That question is outside the scope of this assistant.",
+    "deny_insufficient_context": "Your visible history does not contain that. Try a different question.",
+    "infer_low_confidence": "Inferred with incomplete context. Confidence LOW.",
+    "prompt_version": "prompt v{{v}}",
+    "confidence_label": "confidence: {{c}}"
   }
 }
