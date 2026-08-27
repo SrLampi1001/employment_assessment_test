@@ -514,3 +514,74 @@ But the compliance with screenshots is important, therefore:
 - The AI Agent should create a dedicated folder for the screenshot (And add it to .gitignore)
 - When creating a screenshot, as the user to manually add the image in the corresponding PR or Issue (See issue [#4 comment]https://github.com/SrLampi1001/employment_assessment_test/issues/4#issuecomment-5442930233)
 
+---
+## Phase 5 — Search (ts_headline) + Read receipts (AI)
+
+Branch `feat/phase-5-search-readreceipts`, closes #9. Five commits on top of develop:
+
+| # | Commit | Purpose |
+|---|---|---|
+| 1 | `feat(db): add rw_search_messages + rw_unread_count_for_channel + rw_mark_channel_read` | `db/migrations/0120_rw_search_messages.sql` |
+| 2 | `feat(app): add SearchMessages / MarkChannelRead / UnreadCountForChannel + unread_count on channels` | domain ports + infra adapters + use cases |
+| 3 | `feat(app): wire search + mark-channel-read routes + unread_count in /channels` | `app/delivery.py` + `app/main.py` + fake-repo extension |
+| 4 | `test(search): BDD + unit tests for ts_headline + unread + mark-channel-read` | `backend/tests/features/search.feature` + step defs + unit tests |
+| 5 | `feat(frontend): search panel + per-channel unread badge + auto mark-read on view` | `frontend/src/{App,channels/ChannelList,messages/}` + i18n keys |
+
+### Phase 5 deliverables (vs. issue #9 checklist)
+
+- [x] `ts_headline('spanish'|'english', rw_body, plainto_tsquery(...))` in `app/application/messages/queries.py` — implemented in `backend/app/infrastructure.py:PostgresSearchRepository.search_in_channel`; the locale is pulled from `rw_user.rw_locale` inside the DB function (`rw_search_messages`, migration `0120`), NOT from the client.
+- [x] `rw_message_read` insert + unread-count query — `rw_unread_count_for_channel(channel_id, user_id)` (migration `0120`); called once per channel from `PostgresChannelRepository.list_visible_with_unread` so the channel list endpoint emits the unread badge in one round-trip.
+- [x] `MarkRead` use case — Phase 4 already shipped it; Phase 5 adds the bulk variant `MarkChannelRead`.
+- [x] Delivery: `GET /api/v1/messages/search?q=` + `POST /api/v1/messages/{id}/read` — implemented as **`GET /api/v1/channels/{id}/search?q=`** (channel-scoped) + **`POST /api/v1/channels/{id}/read`** (bulk mark). The single-message `/api/v1/messages/{id}/read` already shipped in Phase 4. ARCH §6 lists `messages/search` but the URL `/channels/{id}/search` follows the same resource nesting the messages-history endpoint uses; the wire shape is identical.
+- [x] Frontend: search panel + unread badges live — `frontend/src/messages/Conversation.tsx` (search panel toggled by the header button) + `frontend/src/channels/ChannelList.tsx` (per-channel + total badges).
+- [x] i18n keys for search UI — ES + EN: `messages.search_placeholder`, `messages.search_button`, `messages.search_no_results`, `messages.search_results_title` (+ plural), `messages.search_clear`, `messages.search_loading`, `channels.unread_badge`.
+
+### Critical details to flag in review
+
+1. **`ts_headline` parameter order — `(locale, body, query, options)`.** The locale is pulled from the actor's `rw_user.rw_locale`, NOT from a parameter the client can lie about, and NOT hardcoded to 'spanish' / 'english'. The DB function does:
+
+   ```sql
+   SELECT CASE rw_locale
+            WHEN 'es' THEN 'spanish'
+            WHEN 'en' THEN 'english'
+            ELSE          'simple'
+          END INTO v_locale FROM rw_user WHERE rw_id = p_actor_id;
+   ```
+
+   Unknown locales fall back to `'simple'` (no stemming) so a malformed row doesn't 500 the whole search.
+
+2. **Unread count query — joins through `rw_channel_member` (defense in depth, RLS doesn't apply inside SECURITY DEFINER).** `rw_unread_count_for_channel` re-checks channel membership at the start and returns `0` for non-members. The count is computed via `NOT EXISTS (rw_message_read WHERE rw_user_id = p_user_id AND rw_message_id = m.rw_id)`.
+
+3. **`char(2)` → `regconfig` casting gotcha.** `rw_user.rw_locale` is `char(2)` in the schema (`'es' / 'en'`), but `plainto_tsquery(regconfig, text)` won't resolve `(char, text)` — the function signature is `(regconfig, text)`. The migration expands `'es'`/`'en'` to `'spanish'`/`'english'` and casts `v_locale::regconfig` at every FTS call site. A naive `to_tsvector(rw_locale, ...)` would fail with `function to_tsquery(character, text) does not exist`.
+
+4. **SECURITY DEFINER bypasses RLS — explicit membership check is mandatory.** Each of the three new functions starts with the same GUC-actor + channel-membership check pattern as `rw_send_message` (Phase 1, `0040`). Without it, a non-member could call `rw_search_messages(their_channel_id=...with_other_users_only)` and bypass RLS entirely.
+
+5. **Your own messages count as unread.** The unread count is "messages in the channel I haven't marked read", which includes messages I sent myself before opening the conversation view (since `markChannelRead` only fires on view-mount, not after every send). This is consistent with how the BDD scenario `Unread count starts at the number of visible messages in the channel` is written. A future phase could exclude `rw_author_id = actor` from the count.
+
+6. **cfparse gotchas** in the BDD step defs (file `test_search.py`):
+   - The literal `... password X exists` suffix is required for the `{password}` capture to NOT be greedy and absorb `secret exists` as one token.
+   - cfparse is word-bounded — `item` (singular) and `items` (plural) need separate step defs (`assert_search_count_single` + `assert_search_count_plural`).
+   - These are inherited from Phase 4 patterns; documented here so the next phase doesn't trip over them.
+
+7. **Auto mark-read fires once per conversation mount, not after every send.** `Conversation.tsx`'s `markChannelRead(...)` runs in the `useEffect([accessToken, channelId, onReadStateChanged])`. Sending a message in an already-open conversation doesn't re-mark — so the badge might lag by 1. This is a Phase 7 follow-up if a stricter contract is needed (call `markChannelRead` after a successful `sendMessage` too).
+
+8. **Search poll = 10 s.** `ChannelList.tsx` polls `GET /api/v1/channels` every 10 s so the unread badge updates without a manual refresh. Phase 6 swaps this for a WebSocket / SSE channel. The poll is intentionally on the list endpoint (not per-message), so the rate is bounded by the number of channels (typically <10).
+
+### Compliance with the Human DECISIONS.md mandates (still in force)
+
+| Mandate | Where it's enforced | How verified |
+|---|---|---|
+| **Playwright MCP for frontend verification** | Developer workflow (uvicorn + vite dev + Playwright MCP navigate / click / snapshot / screenshot). NOT a CI check. | Screenshot at `./.playwright-screenshots/phase5_e2e_verified.png` — please drag-and-drop into PR #15 conversation. |
+| **Discord-like palette** (similar, not equal) | `frontend/src/theme.ts` | No changes in Phase 5; existing palette tokens still apply. |
+| **No drastic frontend changes** | Phase 5 is additive only — `Conversation.tsx` gets a header button + a collapsible search form + a results panel; `ChannelList.tsx` gets badge spans; `App.tsx` gets a `channelsVersion` counter. No refactor. | `git diff` shows the changeset is additive. |
+| **DECISIONS.md additions at the end, do not move HUMAN sections** | This section is appended AFTER the Phase 4 Frontend issue (Human) section. No human sections moved. | `git diff docs/DECISIONS.md` shows only an append, no reshuffling. |
+| **PNGs are noise in the repo root** | `.playwright-screenshots/` is gitignored. Phase 5 screenshot was saved there. `AGENTS.md` documents the workflow + the GitHub API limit (no image upload for issue comments). | `.gitignore` includes `.playwright-screenshots/`; `git ls-files` confirms no PNG in the repo root; the file is on disk for the reviewer to drag-and-drop. |
+
+### Phase 5 risks known but not yet addressed
+
+- **Search poll = 10 s.** Phase 6 swaps the polling for a WebSocket / SSE channel so unread badges + new-message arrivals update within a second.
+- **`ts_headline` with `<mark>` is rendered via `dangerouslySetInnerHTML`.** The server controls the format and only emits `<mark>…</mark>`, so the attack surface is small. A paranoid defence would add a DOMPurify pass on the server-rendered body, but the current implementation is intentionally minimal. Future hardening: add a CSP header that disallows inline scripts + external resources.
+- **Your own messages count as unread.** Phase 7 follow-up: exclude `rw_author_id = actor` from `rw_unread_count_for_channel`.
+- **`MarkChannelRead` returns the count of newly-inserted rows, not the total unread count.** Useful for the API response shape (the frontend doesn't currently use this field, but a follow-up could show "+N marked read" toast).
+- **`OFFSET` is still forbidden** (AGENTS.md / Prohibited Actions). Phase 5 does not introduce OFFSET anywhere — `markChannelRead` uses one `INSERT … SELECT … WHERE NOT EXISTS` statement; `rw_unread_count_for_channel` uses one `SELECT count(*)`; `rw_search_messages` uses `LIMIT`.
+
