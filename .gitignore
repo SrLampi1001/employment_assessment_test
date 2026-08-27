@@ -38,3 +38,4 @@ Thumbs.db
 # image upload for issue comments). See AGENTS.md / "Playwright
 # screenshots".
 .playwright-screenshots/
+.playwright-mcp/
