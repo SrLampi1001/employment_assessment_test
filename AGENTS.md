@@ -37,6 +37,13 @@ gitGraph
   - Require **Human approval** before merge and **passing CI checks**.
   - All branches, expect release branches, are merged via squash merge and deleted.
   - Release branches target main.
+  - **PR workflow mode** (this project is **feature-oriented**, not single-commit):
+    - **Branch**: create a feature branch from `develop`.
+    - **Commits per feature**: multiple commits inside the branch — one per logical unit (`feat:` for code, `test:` for tests, `fix:` for bugfix, `chore:` for maintenance). Don't squash commits *into* the branch; squash happens at merge time.
+    - **Push**: push the branch to `origin`.
+    - **PR**: open the PR against `develop`, fill the template (or rationale + summary if no template), request review.
+    - **Merge**: squash-merge once approved + green CI. The branch is auto-deleted; the squash commit preserves the full commit history on `develop`'s log.
+  - **What this implies for AI agents**: don't try to cram code + test + bugfix into one commit, and don't open a PR with a single "wip" commit. Make small, named commits inside the feature branch and let reviewers follow the work.
 
 ---
 
@@ -117,6 +124,54 @@ Use **[Conventional Commits](https://www.conventionalcommits.org/)**.
 | SQL string concatenation    | Security risk (SQL injection). |
 | Bypassing RLS (`BYPASSRLS`) | Violates core security rule.   |
 | Physical message deletion   | Audit trail must be preserved.  |
+
+---
+
+## Python Development Environment
+
+The Python toolchain must be **isolated and reproducible**. AI agents and human contributors (including grading reviewers in a fresh sandbox) should be able to clone the repo, run one command, and get a working environment with the exact pinned dependencies — no surprises, no system-level `pip install`.
+
+- **Use a virtual environment.** All Python work happens inside a project-local `.venv/` (or `.venv3.13/`). System Python is never used directly.
+- **`.venv/` is gitignored.** A leaked virtualenv is larger than the project itself and breaks reproducibility (it pins to an OS / Python build).
+- **Pin Python.** The project targets **Python 3.13**. `.python-version` (or `pyproject.toml`'s `requires-python = "==3.13.*"`) records the floor so any developer — or CI runner — picks the right interpreter.
+- **Dependency manager:** `uv` is preferred (fast, lockfile-driven, ships its own Python). `pip-tools` is acceptable as a fallback if `uv` is unavailable.
+- **Lockfile is committed.** `uv.lock` (or `requirements.lock`) is the source of truth for transitive pins. The bare `pyproject.toml` / `requirements.txt` declares direct dependencies; the lockfile fixes their versions.
+- **Reproducibility check:** the project must boot on a clean machine from `uv sync` (or `pip install -r requirements.lock`) alone — no manual steps, no `apt-get install`, no global `pip install`.
+
+Forbidden:
+
+- `pip install <package>` against system Python.
+- Committing `.venv/`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `.mypy_cache/`.
+- Hand-editing a lockfile (let the tool regenerate it).
+- Adding a runtime dependency without updating `pyproject.toml` AND the lockfile in the same commit.
+
+---
+
+## Skill Maintenance
+
+Skills under `.agents/skills/` are **AI-agent guardrails**, not the project's source of truth — `ARCHITECTURE.md` is. When real code is shipped that fulfills an example in a skill, the skill must be updated so it does not drift away from reality.
+
+### What to keep vs. replace
+
+| Code in a skill | Treatment |
+|---|---|
+| Descriptive patterns (`function send_message(...)`, generic idiomatic snippets, layer-diagram code) | **Keep.** These teach the AI the *shape* of correct code. They may go slightly stale on syntax details; that's acceptable. |
+| Feature-specific code that mirrors shipped functionality (`@router.post("/channels/{id}/messages")` if `/backend/app/delivery/http/messages.py` already has the real handler) | **Replace with a reference** to the actual file and a one-line summary of what it does. The skill should not contain a second copy of the truth. |
+| Version snapshots (table rows that pin versions) | **Keep**, but mark the date and verify against the project's `pyproject.toml` / `package.json` in PR review. If a pin drifts, open a follow-up. |
+
+### When code ships
+
+Every PR that introduces or moves a feature file **MUST** be followed (in the same PR or in an immediate `chore:` follow-up PR) by:
+
+1. A scan of `.agents/skills/*/SKILL.md` and `references/*.md` for predictive code blocks that now duplicate the shipped file.
+2. A replacement of those blocks with a `See /path/to/actual/file.py` reference plus a one-line summary of what the file does.
+3. A bump of `PROMPT_VERSION` if the change is inside the AI provider's system prompt (so the audit row can bisect).
+
+The follow-up commit uses a `chore(skills):` prefix and is **feature-branch-scoped**, not a global rewrite — only the skill files touched by the original feature get the reference replacement.
+
+### Why this matters
+
+The alternative is the skill becoming a "second source of truth" that contradicts the code. Once the AI has read both, it can't tell which one to follow — and it will pick the one that fits its training-data priors, which is usually the wrong one. The first time this drifts, it becomes a permanent habit.
 
 ---
 
