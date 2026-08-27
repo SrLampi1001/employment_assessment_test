@@ -162,6 +162,50 @@ def as_actor(conn: psycopg.Connection, actor_id: uuid.UUID | None) -> None:
         )
 
 
+@pytest.fixture
+def pg_app_session_factory(pg_app_url: str):
+    """Session factory that yields a fresh `rw_app_login` connection.
+
+    Used by the FastAPI app's RwSession in the BDD auth tests.
+    Phase 7 replaces this with a real psycopg_pool.AsyncConnectionPool;
+    Phase 2 uses one connection per request for simplicity.
+    """
+    from collections.abc import Callable
+
+    from psycopg import Connection
+
+    def factory() -> Connection:
+        return Connection.connect(pg_app_url, autocommit=False)
+
+    return factory
+
+
+@pytest.fixture
+def http_client(pg_app_session_factory, pg_app_url: str):
+    """Build a FastAPI app wired to the testcontainer, return an
+    httpx.Client (sync) backed by FastAPI's TestClient (no real network).
+
+    TestClient wraps ASGITransport under the hood and exposes a
+    synchronous `.get()` / `.post()` API — exactly what the sync
+    BDD step definitions need. Routes connect as `rw_app_login`
+    so RLS is in force end-to-end (the auth tests prove the actor
+    GUC is set on every request).
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(
+        jwt_secret="test-jwt-secret",
+        access_ttl_seconds=900,
+        refresh_ttl_seconds=3600,
+        database_url=pg_app_url,
+    )
+    app = create_app(settings=settings, session_factory=pg_app_session_factory)
+    return TestClient(app)
+
+
 @pytest.fixture(autouse=True)
 def _seed(super_conn: psycopg.Connection) -> None:
     """Seed the two BDD scenarios with their canonical dataset.

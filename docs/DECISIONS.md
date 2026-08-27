@@ -272,3 +272,75 @@ docker compose run --rm seed       # runs the loader
 
 - The loader is **not** wired into `docker-compose.yml` as a service yet — Phase 7 (`/docker-compose.yml` with `migrate` + `seed` services) is where that lands. For Phase 1 the loader is a one-shot script the developer runs by hand.
 - The loader is **dev-only**. Production loads (corp data, customer data) would use a separate ETL job with a role that has been granted `TRUNCATE` on `stg_seed_message`; the script's default DSN points at the dev DB only.
+
+---
+
+## Phase 2 — Auth compliance (AI-assistant)
+
+The Human section above lists three security boundaries the AI Agent must enforce end-to-end. This section records the choices that satisfy them in the shipped code.
+
+### Decisions
+
+1. **Flat `app/` layout for Phase 2, with a one-file-per-layer convention.** Per `arch.fastapi-development` Step 3, the canonical layout is nested (`domain/`, `application/auth/`, `infrastructure/auth/`). Phase 2 ships the simpler flat shape (`config.py`, `domain.py`, `auth.py`, `infrastructure.py`, `delivery.py`, `main.py`) because the auth surface is small and four-file nesting for `auth/RegisterUser.py` would be ceremony. Phase 3+ splits these files into the nested layout as the surface grows — the Skill Maintenance section in `.agents/skills/fastapi-development/SKILL.md` now documents the flat shipped layout AND the predictive nested target.
+2. **Use cases take `class types` for conn-bound adapters** (`PostgresUserRepository`, `PostgresRefreshTokenStore`), not instances. The use case constructs the adapter inside the `RwSession` block, so the adapter's lifetime matches the transaction. Production wires class types; unit tests pass in-memory fakes (`_FakeUserRepo`, `_FakeRefreshStore`).
+3. **`RwSession` is sync, not async.** Phase 2 sticks to `psycopg.Connection` (not `psycopg_pool.AsyncConnectionPool`). Phase 7 swaps in the async pool when the `docker-compose.yml` runs the production app. The shape of `RwSession.__enter__/__exit__` will stay the same; only the inner `cursor()` call goes async.
+4. **JWT access tokens carry `sub` ONLY.** Per AGENTS.md / Prohibited Actions, no role / membership claims are signed into the JWT. Membership is re-resolved from the DB per transaction so a token outliving a role change cannot escalate the actor. The unit test `test_access_jwt_carries_sub_only` enforces this by asserting the JWT payload does not contain `role`, `channel_ids`, `permissions`, `is_admin`, etc.
+5. **JWT middleware does NOT reject a request that lacks a token.** Routes that require authentication take `Depends(get_current_actor)` and that dependency raises 401. The middleware only validates a token if present — `/auth/register`, `/auth/login`, `/auth/refresh` are unauthenticated by design.
+6. **Refresh-token reuse detection MUST `conn.commit()` before raising `AuthError`.** Otherwise `RwSession.__exit__` rolls back the family-wide revoke and the family stays open. This was the most subtle bug in Phase 2 — caught by the BDD scenario in `tests/features/auth.feature` (`Reusing a revoked refresh token revokes the entire family`).
+7. **Refresh tokens use SHA-256, not argon2id.** Refresh tokens are server-generated 384-bit random strings (high-entropy); argon2id is for low-entropy human passwords. SHA-256 with `hmac.compare_digest` for the lookup is the right cost trade-off.
+8. **Login does a constant-time dummy verify when the username is unknown.** Otherwise an attacker can time-side-channel whether a username exists. The dummy hash is a pre-computed valid argon2id hash; the real plaintext is irrelevant — only the verify's CPU cost matters.
+9. **No `user_id` in any request body.** The three auth routes (`/auth/register`, `/auth/login`, `/auth/refresh`) operate on credentials + tokens; none accept an actor identity from the client. The user identity comes from the JWT `sub`, which only the server can issue. Asserted by grep + manual review + the BDD tests.
+
+### Compliance with the DECISIONS.md (Human) section
+
+| Check from the Human section | Where it's enforced | Test |
+|---|---|---|
+| **JWT middleware — security boundary; verify the `sub`-only rule and that no `user_id` field is ever trusted from the request body** | [`/backend/app/delivery.py`](../../backend/app/delivery.py) `JwtAuthMiddleware` + `Depends(get_current_actor)`; `/backend/app/auth.py` `PyJwtService.issue_access` (no role / channel claims) | `tests/unit/application/auth/test_use_cases.py::test_access_jwt_carries_sub_only` (unit); `tests/step_defs/test_auth.py` `The JWT middleware rejects a request with no token / with an expired token / with a tampered token` (BDD) |
+| **Refresh rotation + family reuse detection — verify the SQL transaction revokes the entire family, not just the row** | [`/backend/app/infrastructure.py`](../../backend/app/infrastructure.py) `PostgresRefreshTokenStore.revoke_family` (one SQL `UPDATE … WHERE rw_family_id = %s`); [`/backend/app/auth.py`](../../backend/app/auth.py) `Refresh.__call__` (commits before raising so the security write is durable) | `tests/unit/application/auth/test_use_cases.py::test_reuse_detection_revokes_entire_family` (unit, in-memory fake); `tests/step_defs/test_auth.py` `Reusing a revoked refresh token revokes the entire family` (BDD, real PostgreSQL) |
+| **Password hashing — verify argon2id (not bcrypt, not MD5)** | [`/backend/app/infrastructure.py`](../../backend/app/infrastructure.py) `Argon2idHasher` (argon2-cffi defaults: argon2id with sensible time/memory cost) | `tests/unit/application/auth/test_use_cases.py::test_password_hasher_uses_argon2id` (asserts hash prefix is `$argon2id$`); `test_password_hasher_verifies_correct_password_and_rejects_wrong` (round-trip) |
+
+### Phase 2 file map
+
+```
+backend/app/
+├── config.py        # Settings (JWT secret + TTLs + DB URL)
+├── domain.py        # User, RefreshTokenRecord + Protocols (PasswordHasher, JwtService, RefreshTokenStore, UserRepository, SessionFactory)
+├── auth.py          # RegisterUser, Login, Refresh + TokenPair + AuthError
+├── infrastructure.py # Argon2idHasher, PyJwtService, RwSession, PostgresUserRepository, PostgresRefreshTokenStore, make_session_factory
+├── delivery.py      # JwtAuthMiddleware + get_current_actor + /api/v1/auth/* + /api/v1/me (placeholder for Phase 3)
+└── main.py          # create_app(settings, session_factory)
+```
+
+```
+backend/tests/
+├── unit/application/auth/test_use_cases.py       # 14 tests (in-memory fakes)
+├── features/auth.feature                          # 8 scenarios
+└── step_defs/test_auth.py                        # step definitions
+```
+
+### Phase 2 endpoint surface
+
+| Method & path | Auth | Body | Returns |
+|---|---|---|---|
+| `POST /api/v1/auth/register` | none | `{username, display_name, locale, password}` | `201 {user_id}` |
+| `POST /api/v1/auth/login` | none | `{username, password}` | `200 {access_token, refresh_token, refresh_expires_at}` |
+| `POST /api/v1/auth/refresh` | none | `{refresh_token}` | `200 {access_token, refresh_token, refresh_expires_at}` |
+| `GET  /api/v1/me` | required | — | `200 {actor_id}` (Phase 3 replaces with profile) |
+
+### Phase 2 risks known but not yet addressed
+
+- **`RW_JWT_SECRET` defaults to a dev string** when the env var is unset. Production MUST inject a real secret; `Settings.from_env` would refuse to start in prod with a TODO for Phase 7.
+- **JWT secret rotation is not implemented.** Phase 2 ships one secret; Phase 3+ adds `kid` header + keyset if rotation is needed.
+- **No rate limiting on `/auth/login`.** Brute-force protection is Phase 7 (`ARCHITECTURE.md §11`).
+- **Refresh tokens have no reuse-detection lockout** (beyond the family revoke). An attacker who keeps replaying revoked tokens from a stolen batch will trigger one family revoke per attempt; Phase 7 adds account-level throttling.
+---
+## Phase 2 — Auth — Human intervention (Human)
+Due to a lack of time (Only 2 hours left now):
+- [ ]JWT middleware — security boundary; verify the sub-only rule and that no user_id field is ever trusted from the request body
+- [ ] Refresh rotation + family reuse detection — verify the SQL transaction revokes the entire family, not just the row
+- [ ] Password hashing — verify argon2id (not bcrypt, not MD5)
+
+Need to be performed by the AI Agent, if the AI Agents lacks any tool/MCP that may be useful for the tasks, and can help it create a more robust test, ask the user to configure the environment and set up the tools.
+
+---
+

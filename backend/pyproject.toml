@@ -3,7 +3,12 @@ name = "riwi-backend"
 version = "0.1.0"
 description = "Riwi Co. Internal Messaging Platform — backend (FastAPI + PostgreSQL)."
 requires-python = "==3.13.*"
-dependencies = []
+dependencies = [
+    "fastapi>=0.141.1",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.15.0",
+    "pyjwt>=2.13.0",
+]
 
 [dependency-groups]
 dev = [
