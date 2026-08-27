@@ -58,6 +58,8 @@ def create_app(
     *,
     session_factory: Any | None = None,
     cors_origins: list[str] | None = None,
+    embedder: Any | None = None,
+    chatter: Any | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app.
 
@@ -72,6 +74,14 @@ def create_app(
             frontend can hit the API during local dev. In Phase 7
             the production deployment sets the actual frontend
             origin(s).
+        embedder: Phase 6 — override the embedding adapter. Used by
+            the BDD tests to inject `FakeEmbeddingProvider` so the
+            scenarios run against the real `pgvector` testcontainer
+            without making live Mistral calls. Production leaves
+            this None → builds `MistralAdapter` from settings.
+        chatter: Phase 6 — override the chat adapter. Same rationale
+            as `embedder`. Production leaves this None → builds
+            `NvidiaAdapter` from settings.
     """
     app = FastAPI(title="Riwi Co. Messaging Platform")
 
@@ -204,14 +214,18 @@ def create_app(
     # CopilotError("ai-not-configured", ...). This keeps the rest of
     # the app + tests booting without keys, while production
     # behaviour is honoured when both are set.
-    try:
-        embedder = _build_embedder()
-    except ProviderError:
-        embedder = _UnconfiguredEmbeddingProvider()
-    try:
-        chatter = _build_chatter()
-    except ProviderError:
-        chatter = _UnconfiguredChatProvider()
+    # `embedder` / `chatter` from the create_app kwargs override
+    # both — used by the BDD scenarios to inject fakes.
+    if embedder is None:
+        try:
+            embedder = _build_embedder()
+        except ProviderError:
+            embedder = _UnconfiguredEmbeddingProvider()
+    if chatter is None:
+        try:
+            chatter = _build_chatter()
+        except ProviderError:
+            chatter = _UnconfiguredChatProvider()
 
     ask_copilot_uc = AskCopilot(
         session_factory=factory,

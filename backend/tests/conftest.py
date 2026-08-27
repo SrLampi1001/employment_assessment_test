@@ -195,6 +195,7 @@ def http_client(pg_app_session_factory, pg_app_url: str):
 
     from app.config import Settings
     from app.main import create_app
+    from tests.fake_chat_provider import FakeChatProvider, FakeEmbeddingProvider
 
     settings = Settings(
         jwt_secret="test-jwt-secret",
@@ -203,8 +204,11 @@ def http_client(pg_app_session_factory, pg_app_url: str):
         database_url=pg_app_url,
         # Phase 6: AI providers — empty strings in tests so the
         # main factory falls back to the "ai-not-configured" stubs.
-        # The copilot endpoint is tested separately (in test_copilot.py)
-        # with FakeEmbeddingProvider / FakeChatProvider injected.
+        # We override the embedder + chatter below with fakes so
+        # the copilot BDD scenarios can exercise RLS gating +
+        # the denial-taxonomy classification without live API
+        # calls (per ai-provider-integration / Step 9: adapter
+        # smoke tests are gated by RUN_AI_SMOKE=1).
         mistral_api_key="",
         nvidia_api_key="",
         mistral_embed_model="mistral-embed",
@@ -214,7 +218,12 @@ def http_client(pg_app_session_factory, pg_app_url: str):
         chat_temperature=0.2,
         chat_request_timeout_s=30.0,
     )
-    app = create_app(settings=settings, session_factory=pg_app_session_factory)
+    app = create_app(
+        settings=settings,
+        session_factory=pg_app_session_factory,
+        embedder=FakeEmbeddingProvider(),
+        chatter=FakeChatProvider(),
+    )
     return TestClient(app)
 
 
@@ -236,6 +245,21 @@ def ctx() -> dict:
         "registered": {},     # username -> password (also in users)
         "last_response": None,
     }
+
+
+@pytest.fixture(autouse=True)
+def _reset_fake_chat_state():
+    """Reset the fake chat provider's `_next_response` to the default
+    deny:insufficient-context before each test, so pushback BDD
+    scenarios don't leak state. The fake lives in
+    `tests/fake_chat_provider.py`; this autouse fixture lives in
+    conftest so it's honoured regardless of which test module runs.
+    """
+    from tests.fake_chat_provider import _reset_default
+
+    _reset_default()
+    yield
+    _reset_default()
 
 
 @pytest.fixture(autouse=True)

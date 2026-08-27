@@ -203,7 +203,7 @@ class AskCopilot:
                 rw_id=chunk.rw_id,
                 rw_channel_id=chunk.rw_channel_id,
                 snippet=(
-                    (chunk.rw_body[:117] + "…")
+                    (chunk.rw_body[:119] + "…")
                     if len(chunk.rw_body) > 120
                     else chunk.rw_body
                 ),

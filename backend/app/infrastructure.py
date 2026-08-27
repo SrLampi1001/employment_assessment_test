@@ -626,7 +626,13 @@ class PostgresMessageRepository:
                     rw_channel_id=r[1],
                     rw_body=r[2],
                     rw_created_at=r[3],
-                    distance=float(r[4]),
+                    # Distance may be NULL if the row's embedding is
+                    # NULL (Phase 1 + the trigger only WARN — some
+                    # test data may have no embedding). Use a large
+                    # sentinel so the row still appears in the LIMIT
+                    # (NULL sorts last in ASC, but `ORDER BY x ASC`
+                    # skips NULL entirely in some plans). Use 1e9.
+                    distance=float(r[4]) if r[4] is not None else 1e9,
                 )
                 for r in rows
             ]
