@@ -35,6 +35,9 @@ from .domain import (
     GROUP,
     JwtService,
     MEMBER,
+    Message,
+    MessageEdit,
+    MessageRepository,
     PasswordHasher,
     RefreshTokenRecord,
     RefreshTokenStore,
@@ -349,6 +352,185 @@ class PostgresChannelMemberRepository:
                 (channel_id, user_id),
             )
             return cur.rowcount > 0
+
+
+class PostgresMessageRepository:
+    """Postgres-backed message persistence.
+
+    All write paths go through `rw_send_message(...)`,
+    `rw_edit_message(...)`, and `rw_delete_message(...)` — the
+    Security-Definer functions defined in Phase 1 (0040). The actor
+    GUC is set by `RwSession`; the functions re-check it as defense
+    in depth.
+
+    Reads (`history_keyset`, `find_visible`) use RLS — non-members
+    see zero rows automatically. `rw_deleted_at IS NULL` keeps the
+    history consistent with the `rw_visible_message` view (logical
+    delete must NEVER be bypassed by a different code path).
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def send_idempotent(
+        self,
+        *,
+        channel_id: UUID,
+        author_id: UUID,
+        body: str,
+        client_ref: str | None,
+    ) -> tuple[Message, bool]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM rw_send_message(%s, %s, %s, %s)",
+                (channel_id, author_id, body, client_ref),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "rw_send_message returned no row (should not happen)"
+                )
+            # `out_was_replay` is the first OUT param of the function
+            # (Phase 4 migration 0110). The remaining columns are the
+            # rw_message row, in their schema order.
+            was_replay = bool(row[0])
+            msg = self._row_to_message(row[1:])
+            return msg, was_replay
+
+    def find_visible(
+        self, message_id: UUID, viewer_id: UUID
+    ) -> Message | None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_id, rw_channel_id, rw_author_id, rw_client_ref, "
+                "       rw_body, rw_is_edited, rw_created_at, rw_edited_at, "
+                "       rw_deleted_at, rw_deleted_reason "
+                "FROM rw_message "
+                "WHERE rw_id = %s AND rw_deleted_at IS NULL",
+                (message_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._row_to_message(row)
+
+    def history_keyset(
+        self,
+        *,
+        channel_id: UUID,
+        before: tuple[datetime, UUID] | None,
+        limit: int,
+    ) -> list[Message]:
+        # Keyset predicate: (rw_created_at, rw_id) < (cursor_ts, cursor_id).
+        # The composite index `(rw_channel_id, rw_created_at DESC, rw_id DESC)`
+        # (Phase 1, 0030_indexes.sql) supports this without an OFFSET scan.
+        if before is None:
+            sql = (
+                "SELECT rw_id, rw_channel_id, rw_author_id, rw_client_ref, "
+                "       rw_body, rw_is_edited, rw_created_at, rw_edited_at, "
+                "       rw_deleted_at, rw_deleted_reason "
+                "FROM rw_message "
+                "WHERE rw_channel_id = %s AND rw_deleted_at IS NULL "
+                "ORDER BY rw_created_at DESC, rw_id DESC "
+                "LIMIT %s"
+            )
+            params: tuple = (channel_id, limit)
+        else:
+            sql = (
+                "SELECT rw_id, rw_channel_id, rw_author_id, rw_client_ref, "
+                "       rw_body, rw_is_edited, rw_created_at, rw_edited_at, "
+                "       rw_deleted_at, rw_deleted_reason "
+                "FROM rw_message "
+                "WHERE rw_channel_id = %s "
+                "  AND rw_deleted_at IS NULL "
+                "  AND (rw_created_at, rw_id) < (%s::timestamptz, %s::uuid) "
+                "ORDER BY rw_created_at DESC, rw_id DESC "
+                "LIMIT %s"
+            )
+            params = (
+                channel_id,
+                before[0],
+                before[1],
+                limit,
+            )
+        with self._conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [self._row_to_message(r) for r in rows]
+
+    def edit(
+        self, *, message_id: UUID, editor_id: UUID, new_body: str
+    ) -> bool:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "CALL rw_edit_message(%s, %s, %s)",
+                (message_id, editor_id, new_body),
+            )
+            # Procedures don't return rowcount; verify by re-select.
+            cur.execute(
+                "SELECT 1 FROM rw_message "
+                "WHERE rw_id = %s AND rw_is_edited = true "
+                "  AND rw_edited_at >= now() - interval '5 seconds'",
+                (message_id,),
+            )
+            return cur.fetchone() is not None
+
+    def logical_delete(
+        self,
+        *,
+        message_id: UUID,
+        actor_id: UUID,
+        reason: str,
+    ) -> bool:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "CALL rw_delete_message(%s, %s, %s)",
+                (message_id, actor_id, reason),
+            )
+            cur.execute(
+                "SELECT 1 FROM rw_message "
+                "WHERE rw_id = %s AND rw_deleted_at IS NOT NULL "
+                "  AND rw_deleted_reason = %s",
+                (message_id, reason),
+            )
+            return cur.fetchone() is not None
+
+    def mark_read(self, *, message_id: UUID, user_id: UUID) -> bool:
+        # INSERT ... ON CONFLICT DO NOTHING. Returns True iff a new
+        # row was inserted (the unique constraint on
+        # (rw_message_id, rw_user_id) makes this safe to retry).
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO rw_message_read (rw_message_id, rw_user_id) "
+                "VALUES (%s, %s) "
+                "ON CONFLICT (rw_message_id, rw_user_id) DO NOTHING "
+                "RETURNING rw_id",
+                (message_id, user_id),
+            )
+            return cur.fetchone() is not None
+
+    @staticmethod
+    def _row_to_message(row: tuple) -> Message:
+        return Message(
+            rw_id=row[0],
+            rw_channel_id=row[1],
+            rw_author_id=row[2],
+            rw_client_ref=row[3],
+            rw_body=row[4],
+            rw_is_edited=row[5],
+            rw_created_at=row[6],
+            rw_edited_at=row[7],
+            rw_deleted_at=row[8],
+            rw_deleted_reason=row[9],
+        )
+
+
+# Backwards-compat alias for the row shape returned by `rw_send_message`.
+# The function's first OUT parameter is `was_replay`; the next 10 are
+# the rw_message columns in their schema order. The adapter above
+# uses this shift implicitly; tests and other callers can use it too.
+def _row_to_message_from_send(row10: tuple) -> Message:
+    return PostgresMessageRepository._row_to_message(row10)
 
 
 class PostgresRefreshTokenStore:

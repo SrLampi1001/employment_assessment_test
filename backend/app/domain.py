@@ -69,6 +69,29 @@ class RefreshTokenRecord:
     rw_revoked_at: datetime | None
 
 
+@dataclass(frozen=True)
+class Message:
+    rw_id: UUID
+    rw_channel_id: UUID
+    rw_author_id: UUID
+    rw_client_ref: str | None
+    rw_body: str
+    rw_is_edited: bool
+    rw_created_at: datetime
+    rw_edited_at: datetime | None
+    rw_deleted_at: datetime | None
+    rw_deleted_reason: str | None
+
+
+@dataclass(frozen=True)
+class MessageEdit:
+    rw_id: UUID
+    rw_message_id: UUID
+    rw_body: str
+    rw_edited_at: datetime
+    rw_editor_id: UUID
+
+
 # ─── Ports ───────────────────────────────────────────────────────────────
 
 
@@ -154,6 +177,75 @@ class ChannelMemberRepository(Protocol):
         """Sets `rw_left_at = now()` on the actor's current membership.
         Returns True if a row was updated, False if the actor was not
         a current member. Idempotent — leaving twice is a no-op."""
+        ...
+
+
+class MessageRepository(Protocol):
+    """Persistence boundary for messages + keyset history.
+
+    `send_idempotent` returns either the freshly-inserted row OR the
+    existing row (when `(rw_author_id, rw_client_ref) WHERE
+    rw_client_ref IS NOT NULL` collides). The `idempotent_replay` flag
+    tells the use case which path was taken — a `True` return is a
+    "no-op", not a duplicate insert.
+    """
+
+    def send_idempotent(
+        self,
+        *,
+        channel_id: UUID,
+        author_id: UUID,
+        body: str,
+        client_ref: str | None,
+    ) -> tuple[Message, bool]:
+        """Returns `(message, was_replay)`. Uses `rw_send_message(...)`
+        (Phase 1, 0040) which has `ON CONFLICT DO NOTHING + RETURNING`
+        semantics; on replay, the existing row is selected."""
+        ...
+
+    def find_visible(self, message_id: UUID, viewer_id: UUID) -> Message | None:
+        """Read a single message. RLS-gated: returns `None` when the
+        viewer is not a current member of the channel."""
+        ...
+
+    def history_keyset(
+        self,
+        *,
+        channel_id: UUID,
+        before: tuple[datetime, UUID] | None,
+        limit: int,
+    ) -> list[Message]:
+        """Keyset page of visible messages, newest first.
+
+        Cursor tuple `(created_at, id)` is the strict-less-than bound.
+        `None` cursor means "start from the latest". RLS does the
+        visibility filter; we add `WHERE rw_deleted_at IS NULL` so the
+        view stays consistent with `rw_visible_message`.
+        """
+        ...
+
+    def edit(self, *, message_id: UUID, editor_id: UUID, new_body: str) -> bool:
+        """Calls `rw_edit_message(...)`. Returns True if the message
+        was updated, False if it didn't exist / was deleted / the
+        editor isn't the author."""
+        ...
+
+    def logical_delete(
+        self,
+        *,
+        message_id: UUID,
+        actor_id: UUID,
+        reason: str,
+    ) -> bool:
+        """Calls `rw_delete_message(...)`. Returns True if the row was
+        marked deleted, False if the actor wasn't the author / the row
+        was already deleted / it didn't exist."""
+        ...
+
+    def mark_read(self, *, message_id: UUID, user_id: UUID) -> bool:
+        """Inserts a `(message_id, user_id)` row into `rw_message_read`
+        if absent (the table has a UNIQUE constraint that makes this
+        safe to retry). Returns True on insert."""
         ...
 
 
