@@ -24,7 +24,8 @@
     "cancel": "Cancelar",
     "leave": "Salir",
     "owner_badge": "Propietario",
-    "member_badge": "Miembro"
+    "member_badge": "Miembro",
+    "unread_badge": "{{count}} nuevos"
   },
   "messages": {
     "title": "Mensajes",
@@ -42,6 +43,13 @@
     "edited_suffix": "(editado)",
     "load_more": "Cargar más",
     "loading": "Cargando…",
-    "empty_channel": "Aún no hay mensajes"
+    "empty_channel": "Aún no hay mensajes",
+    "search_placeholder": "Buscar en esta conversación…",
+    "search_button": "Buscar",
+    "search_no_results": "Sin coincidencias",
+    "search_results_title": "{{count}} coincidencia",
+    "search_results_title_plural": "{{count}} coincidencias",
+    "search_clear": "Limpiar",
+    "search_loading": "Buscando…"
   }
 }

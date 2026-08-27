@@ -24,7 +24,8 @@
     "cancel": "Cancel",
     "leave": "Leave",
     "owner_badge": "Owner",
-    "member_badge": "Member"
+    "member_badge": "Member",
+    "unread_badge": "{{count}} new"
   },
   "messages": {
     "title": "Messages",
@@ -42,6 +43,13 @@
     "edited_suffix": "(edited)",
     "load_more": "Load more",
     "loading": "Loading…",
-    "empty_channel": "No messages yet"
+    "empty_channel": "No messages yet",
+    "search_placeholder": "Search in this conversation…",
+    "search_button": "Search",
+    "search_no_results": "No matches",
+    "search_results_title": "{{count}} match",
+    "search_results_title_plural": "{{count}} matches",
+    "search_clear": "Clear",
+    "search_loading": "Searching…"
   }
 }
