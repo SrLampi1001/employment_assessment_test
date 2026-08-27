@@ -24,3 +24,4 @@ packages = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
+bdd_features_base_dir = "tests/features"
