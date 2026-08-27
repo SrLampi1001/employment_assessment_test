@@ -175,3 +175,46 @@ The marker is the *only* signal that distinguishes an inferred answer from a rea
 **Resolution:** the previous version of this file referenced the removed Cineteca content in the React skill row. That reference was unnecessary — there is no Cineteca commit in this repo's history, so future readers waste cycles looking for it. The row is now phrased generically ("Generalized to a project-agnostic skill …") so the change is described without naming content that was never here.
 
 ---
+## Phase 0 — No harcoded ports (Human)
+Since ports are very likely to be occupied in other sandboxes, or by user preference, there should be a politic for:
+- No harcoded ports 
+This can be achieved via the .env file, or a custom made .env.ports file
+The decisions for the file is given to the AI Agent, the initial mention of this policy is in PR #10;
+---
+
+## Phase 0 — No hardcoded ports (AI-assistant)
+
+The Human section above established the policy: **no hardcoded ports** in the dev stack, so a sandbox where 5432 or 5173 is taken does not break `docker compose up` / `npm run dev`. This section records the file-format decision and the compliance with the policy in PR #10.
+
+### Decision
+
+Single root `.env` (gitignored, holds real values) + `.env.example` (committed, holds the documented defaults). Both `docker-compose.yml` and `frontend/vite.config.ts` read from `./.env`.
+
+**Why not `.env.ports`** — Docker Compose only auto-loads `.env` next to the compose file (other names need `--env-file path/to/file`); Vite's `loadEnv` defaults to the project root. Splitting ports into `.env.ports` would mean both tools need an explicit override flag and the file naming diverges from the ecosystem convention. A single `.env` scales into Phase 7 (where `MISTRAL_API_KEY`, `NVIDIA_API_KEY`, `JWT_SECRET`, `DATABASE_URL` join the same file) without changing either loader.
+
+**Why not per-tool `.env` files** (`/frontend/.env` + root `.env`) — they drift the moment someone changes a port in only one place. One source of truth, one edit point.
+
+**Why `${VAR:-default}` fallbacks in `docker-compose.yml`** — the stack still boots on a fresh clone before the developer has run `cp .env.example .env`. The defaults match `.env.example`.
+
+### Variables
+
+| Var | Purpose | Default | Loaded by |
+|---|---|---|---|
+| `POSTGRES_PORT` | Host port → container's internal 5432 | `5433` | `docker-compose.yml` (host-side mapping) |
+| `POSTGRES_USER` | Postgres superuser inside the container | `postgres` | `docker-compose.yml` (container env) |
+| `POSTGRES_PASSWORD` | Postgres superuser password | dev placeholder | `docker-compose.yml` (container env) |
+| `POSTGRES_DB` | Default database created on first boot | `riwi` | `docker-compose.yml` (container env) |
+| `FRONTEND_PORT` | Vite dev server port | `5173` | `frontend/vite.config.ts` |
+
+### Compliance in PR #10
+
+- **`docker-compose.yml`** — `ports` and `environment` use `${VAR:-default}` substitution; the `:-default` is the safety net so the stack still boots if `.env` is missing.
+- **`frontend/vite.config.ts`** — uses `loadEnv(mode, resolve(here, '..'), '')` to read from the project root; the empty prefix loads every var (Phase 0 only reads `FRONTEND_PORT`).
+- **`.env.example`** — committed with real port defaults (so a fresh clone works without edits) and a `dev_only_change_me` password placeholder so the committed file is obviously not for production.
+- **`.env`** — created locally for the developer; gitignored by the existing root `.gitignore` (entries `.env`, `.env.local`, `.env.*.local` were added when AGENTS.md was written).
+
+### Future phases
+
+- Phase 2 will add `MISTRAL_API_KEY`, `NVIDIA_API_KEY`, `JWT_SECRET`, `DATABASE_URL` to the same root `.env` (backend reads via `pydantic-settings`; the frontend never sees them).
+- The "no VITE_ prefix leak" rule applies to client-side code only: Vite enforces the `VITE_` prefix at build time for any var that reaches the bundle. Server-side config (DB, API keys, JWT secret) is read by the Python backend, not by Vite.
+- If a client-side env var is ever needed (e.g. `VITE_API_BASE_URL`), it must use the `VITE_` prefix; the `loadEnv` call in `vite.config.ts` will then naturally include it.
