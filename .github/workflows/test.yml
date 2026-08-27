@@ -36,12 +36,14 @@ jobs:
         working-directory: backend
         run: uv sync
 
-      - name: Apply DB migrations
+      - name: Apply DB migrations (service db — for the verify-roles step)
         env:
           PGPASSWORD: postgres
         run: |
-          psql -h localhost -U postgres -d riwi_test -f db/migrations/0001_extensions.sql
-          psql -h localhost -U postgres -d riwi_test -f db/migrations/0002_roles.sql
+          for f in db/migrations/*.sql; do
+            echo "### Applying $f"
+            psql -h localhost -U postgres -d riwi_test -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Verify roles (NOLOGIN, no BYPASSRLS)
         env:
@@ -55,7 +57,7 @@ jobs:
           echo "rw_app_login  | super=f | bypassrls=f | login=t"
           echo "rw_migrator   | super=f | bypassrls=f | login=t"
 
-      - name: Run tests
+      - name: Run tests (BDD against pgvector testcontainer)
         working-directory: backend
         run: uv run pytest -v
 
