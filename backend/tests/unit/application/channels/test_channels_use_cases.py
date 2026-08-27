@@ -63,6 +63,14 @@ class _FakeChannelRepo:
                     out.append((ch, m))
         return out
 
+    def list_visible_with_unread(
+        self,
+    ) -> list[tuple[Channel, ChannelMember, int]]:
+        """Phase 5: same as `list_visible` plus a per-channel unread
+        count. The fake returns 0 for everything (the unread plumbing
+        is owned by the message repo in production)."""
+        return [(ch, m, 0) for ch, m in self.list_visible()]
+
     def find(self, channel_id: UUID) -> Channel | None:
         return self.channels.get(channel_id)
 
