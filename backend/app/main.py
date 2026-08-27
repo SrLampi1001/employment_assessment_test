@@ -29,6 +29,7 @@ from .infrastructure import (
     PostgresChannelRepository,
     PostgresMessageRepository,
     PostgresRefreshTokenStore,
+    PostgresSearchRepository,
     PostgresUserRepository,
     PyJwtService,
     make_session_factory,
@@ -37,7 +38,9 @@ from .messages import (
     ChannelHistory,
     DeleteMessage,
     EditMessage,
+    MarkChannelRead,
     MarkRead,
+    SearchMessages,
     SendMessage,
 )
 
@@ -156,6 +159,17 @@ def create_app(
         message_repo_factory=message_repo_factory,
     )
 
+    # ── Phase 5 use cases (search + bulk mark-read) ─────────────────────
+    search_repo_factory = PostgresSearchRepository
+    search_messages_uc = SearchMessages(
+        session_factory=factory,
+        search_repo_factory=search_repo_factory,
+    )
+    mark_channel_read_uc = MarkChannelRead(
+        session_factory=factory,
+        message_repo_factory=message_repo_factory,
+    )
+
     # ── Routers ─────────────────────────────────────────────────────────
     app.include_router(
         build_auth_router(
@@ -182,8 +196,11 @@ def create_app(
             delete_message=delete_message_uc,
             channel_history=channel_history_uc,
             mark_read=mark_read_uc,
+            mark_channel_read=mark_channel_read_uc,
+            search_messages=search_messages_uc,
             session_factory=factory,
             message_repo_factory=message_repo_factory,
+            search_repo_factory=search_repo_factory,
         )
     )
 

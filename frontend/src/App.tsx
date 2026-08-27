@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { clearTokens, getTokens, getUser } from './auth/api'
 import { LoginPanel } from './auth/LoginPanel'
@@ -31,6 +31,25 @@ export default function App() {
   )
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null)
   const [myUserId, setMyUserId] = useState<string | null>(null)
+
+  // Phase 5: a monotonically-increasing counter that, when bumped,
+  // tells the ChannelList to refetch. We don't share the channel
+  // array between App and ChannelList (ChannelList owns its state
+  // for the create/leave flow); instead, bumping this counter is
+  // a cheap way to re-trigger its effect.
+  const [channelsVersion, setChannelsVersion] = useState(0)
+  // Hold the bump function in a ref so the Conversation's effect
+  // deps don't include it (the callback identity must be stable;
+  // otherwise the auto-mark-read re-runs every time the version
+  // changes).
+  const bumpRef = useRef<() => void>(() => undefined)
+  const bumpChannelsVersion = useCallback(() => {
+    setChannelsVersion((v) => v + 1)
+  }, [])
+  bumpRef.current = bumpChannelsVersion
+  const stableReadStateChanged = useCallback(() => {
+    bumpRef.current()
+  }, [])
 
   // Derive myUserId from the JWT `sub` whenever the access token changes.
   // The server is still the source of truth; this is just a UI convenience
@@ -125,12 +144,14 @@ export default function App() {
             username={username}
             selectedChannelId={selectedChannelId}
             onSelect={setSelectedChannelId}
+            refreshTrigger={channelsVersion}
           />
           {selectedChannelId && myUserId ? (
             <Conversation
               accessToken={tokens.access_token}
               channelId={selectedChannelId}
               myUserId={myUserId}
+              onReadStateChanged={stableReadStateChanged}
             />
           ) : (
             <div

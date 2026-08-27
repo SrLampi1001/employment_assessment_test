@@ -5,6 +5,10 @@ export interface Channel {
   created_by: string
   created_at: string
   my_role: 1 | 2 // 1 = member, 2 = owner
+  // Phase 5: unread count for the current actor. The backend
+  // computes this via rw_unread_count_for_channel; the frontend
+  // just renders the badge.
+  unread_count: number
 }
 
 export async function listChannels(accessToken: string): Promise<Channel[]> {

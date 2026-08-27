@@ -64,6 +64,11 @@ class ChannelSummary:
     created_by: UUID
     created_at: datetime
     my_role: int
+    # Phase 5: unread count for the actor in this channel. 0 for
+    # channels where everything is read. 0 for non-members (but
+    # non-members are filtered out by RLS before this dataclass
+    # is built).
+    unread_count: int = 0
 
 
 # Factory types — class objects work as factories, same pattern as Phase 2.
@@ -238,7 +243,7 @@ class ListVisibleChannels:
     def __call__(self, *, actor_id: UUID) -> list[ChannelSummary]:
         with RwSession(self._session_factory, actor_id=actor_id) as conn:
             repo = self._channel_repo_factory(conn)
-            rows = repo.list_visible()
+            rows = repo.list_visible_with_unread()
             return [
                 ChannelSummary(
                     channel_id=ch.rw_id,
@@ -247,8 +252,9 @@ class ListVisibleChannels:
                     created_by=ch.rw_created_by,
                     created_at=ch.rw_created_at,
                     my_role=m.rw_role,
+                    unread_count=unread,
                 )
-                for ch, m in rows
+                for ch, m, unread in rows
             ]
 
 

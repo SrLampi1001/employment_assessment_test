@@ -51,8 +51,11 @@ from .messages import (
     ChannelHistory,
     DeleteMessage,
     EditMessage,
+    MarkChannelRead,
     MarkRead,
     MessageError,
+    SearchMessages,
+    SearchHitSummary,
     SendMessage,
 )
 
@@ -275,6 +278,7 @@ class ChannelOut(BaseModel):
     created_by: UUID
     created_at: datetime
     my_role: int
+    unread_count: int = 0
 
 
 class ChannelsListOut(BaseModel):
@@ -375,6 +379,7 @@ def build_channels_router(
                     created_by=i.created_by,
                     created_at=i.created_at,
                     my_role=i.my_role,
+                    unread_count=i.unread_count,
                 )
                 for i in items
             ]
@@ -459,6 +464,7 @@ def _channel_summary(
                 created_by=i.created_by,
                 created_at=i.created_at,
                 my_role=i.my_role,
+                unread_count=i.unread_count,
             )
     # If the actor can't see it, something is very wrong (they just
     # created it). Surface as 500.
@@ -495,6 +501,8 @@ _STATUS_MAP = {
     "message-not-found": status.HTTP_404_NOT_FOUND,
     "not-author": status.HTTP_403_FORBIDDEN,
     "idempotent-replay": status.HTTP_200_OK,
+    # ── Phase 5 search + read codes ────────────────────────────────────
+    "invalid-query": status.HTTP_400_BAD_REQUEST,
 }
 
 
@@ -542,10 +550,15 @@ def build_messages_router(
     delete_message: DeleteMessage,
     channel_history: ChannelHistory,
     mark_read: MarkRead,
+    mark_channel_read: MarkChannelRead,
+    search_messages: SearchMessages,
     session_factory,
     message_repo_factory,
+    search_repo_factory,
 ) -> APIRouter:
-    """Routes for `/api/v1/channels/{id}/messages` + `/api/v1/messages/{id}`.
+    """Routes for `/api/v1/channels/{id}/messages` + `/api/v1/messages/{id}`
+    + `/api/v1/channels/{id}/search` + `/api/v1/channels/{id}/read`
+    (Phase 5).
 
     Authorization:
     - All routes require a JWT (Depends(get_current_actor)).
@@ -555,6 +568,9 @@ def build_messages_router(
       GUC actor and channel membership as defense in depth — even
       with a valid JWT, a non-member cannot insert / edit / delete
       messages in a channel they cannot see.
+    - Phase 5: `rw_search_messages` / `rw_mark_channel_read` /
+      `rw_unread_count_for_channel` apply the same checks. A
+      non-member gets zero results / zero unread / a no-op mark.
     """
     from .infrastructure import RwSession, PostgresMessageRepository
 
@@ -717,5 +733,71 @@ def build_messages_router(
     ) -> None:
         mark_read(actor_id=actor, message_id=message_id)
         return None
+
+    # ─── Phase 5: search + bulk mark-read ─────────────────────────────
+
+    class SearchHitOut(BaseModel):
+        rw_id: UUID
+        rw_channel_id: UUID
+        rw_author_id: UUID
+        rw_body: str
+        rw_created_at: datetime
+        rw_highlight: str
+        is_mine: bool
+
+    class SearchOut(BaseModel):
+        items: list[SearchHitOut]
+
+    class MarkChannelReadOut(BaseModel):
+        inserted: int
+
+    @router.get(
+        "/channels/{channel_id}/search",
+        response_model=SearchOut,
+    )
+    async def search(
+        channel_id: UUID,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+        q: Annotated[str, Query(min_length=1, max_length=200)],
+        limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    ) -> SearchOut:
+        try:
+            hits = search_messages(
+                actor_id=actor,
+                channel_id=channel_id,
+                query=q,
+                limit=limit,
+            )
+        except MessageError as e:
+            raise HTTPException(
+                status_code=_status_for(e.code), detail=e.message
+            ) from None
+        return SearchOut(
+            items=[
+                SearchHitOut(
+                    rw_id=h.rw_id,
+                    rw_channel_id=h.rw_channel_id,
+                    rw_author_id=h.rw_author_id,
+                    rw_body=h.rw_body,
+                    rw_created_at=h.rw_created_at,
+                    rw_highlight=h.rw_highlight,
+                    is_mine=h.is_mine,
+                )
+                for h in hits
+            ]
+        )
+
+    @router.post(
+        "/channels/{channel_id}/read",
+        response_model=MarkChannelReadOut,
+    )
+    async def mark_channel(
+        channel_id: UUID,
+        actor: Annotated[UUID, Depends(get_current_actor)],
+    ) -> MarkChannelReadOut:
+        inserted = mark_channel_read(
+            actor_id=actor, channel_id=channel_id
+        )
+        return MarkChannelReadOut(inserted=inserted)
 
     return router

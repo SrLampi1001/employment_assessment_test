@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   type Message,
+  type SearchHit,
   deleteMessage,
   editMessage,
   fetchHistory,
+  markChannelRead,
+  searchInChannel,
   sendMessage,
 } from './api'
 import { colors, radii } from '../theme'
@@ -16,21 +19,29 @@ interface Props {
   /** Notify the parent when the conversation zone needs to remount
    *  (e.g. the user switches channels or leaves). */
   onClose?: () => void
+  /** Phase 5: notify the parent that the channel's read-state
+   *  changed (mark-read ran) so the channel list can refresh
+   *  unread badges. */
+  onReadStateChanged?: () => void
 }
 
 type Pending = { clientRef: string; body: string; status: 'pending' | 'failed' }
 
 /**
  * Conversation view for one channel. Implements the
- * *pending → sent → failed* state machine + lazy keyset history.
+ * *pending → sent → failed* state machine + lazy keyset history +
+ * Phase 5: lexical search panel + auto mark-read on view.
  *
  * Renders a top bar (channel name + leave), a scrollable message
- * list (oldest at top, newest at bottom), and a composer at the
- * bottom. New messages appear immediately in the "pending" slot
- * with a muted background; on success, they're keyed by the
- * server-side `rw_id`; on failure, a retry button appears.
+ * list (oldest at top, newest at bottom), a search panel that
+ * overlays the list when active, and a composer at the bottom.
  */
-export function Conversation({ accessToken, channelId, myUserId }: Props) {
+export function Conversation({
+  accessToken,
+  channelId,
+  myUserId,
+  onReadStateChanged,
+}: Props) {
   const { t } = useTranslation()
   const [messages, setMessages] = useState<Message[]>([])
   const [pending, setPending] = useState<Pending[]>([])
@@ -43,7 +54,15 @@ export function Conversation({ accessToken, channelId, myUserId }: Props) {
   const [error, setError] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  // ── Load the first page on mount + when channelId changes ─────────
+  // ── Phase 5: search state ────────────────────────────────────────
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<SearchHit[] | null>(
+    null,
+  )
+  const [searchLoading, setSearchLoading] = useState(false)
+
+  // ── Load the first page + auto mark-read on mount / channelId change ─
   useEffect(() => {
     let cancelled = false
     async function load() {
@@ -51,6 +70,9 @@ export function Conversation({ accessToken, channelId, myUserId }: Props) {
       setError(null)
       setMessages([])
       setPending([])
+      setSearchOpen(false)
+      setSearchQuery('')
+      setSearchResults(null)
       try {
         const page = await fetchHistory(accessToken, channelId, null)
         if (!cancelled) {
@@ -62,12 +84,40 @@ export function Conversation({ accessToken, channelId, myUserId }: Props) {
       } finally {
         if (!cancelled) setLoading(false)
       }
+      // Phase 5: mark all visible messages in this channel as read
+      // when the conversation view opens. The backend is idempotent
+      // (the UNIQUE constraint on (rw_message_id, rw_user_id) swallows
+      // duplicates), so a re-mount is safe. The parent is notified via
+      // onReadStateChanged so the channel list can refresh and the
+      // unread badge clears.
+      try {
+        await markChannelRead(accessToken, channelId)
+        if (!cancelled) onReadStateChanged?.()
+      } catch (err) {
+        if (!cancelled) setError(String(err))
+      }
     }
     void load()
     return () => {
       cancelled = true
     }
-  }, [accessToken, channelId])
+  }, [accessToken, channelId, onReadStateChanged])
+
+  // ── Phase 5: run search ─────────────────────────────────────────
+  const onSearch = useCallback(async () => {
+    const q = searchQuery.trim()
+    if (!q) return
+    setSearchLoading(true)
+    setError(null)
+    try {
+      const hits = await searchInChannel(accessToken, channelId, q)
+      setSearchResults(hits)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setSearchLoading(false)
+    }
+  }, [searchQuery, accessToken, channelId])
 
   // ── Auto-scroll to bottom on new messages ────────────────────────
   useEffect(() => {
@@ -192,10 +242,132 @@ export function Conversation({ accessToken, channelId, myUserId }: Props) {
           padding: '0.75rem 1rem',
           borderBottom: `1px solid ${colors.border}`,
           fontWeight: 600,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
         }}
       >
-        {t('messages.title')}
+        <span>{t('messages.title')}</span>
+        <button
+          type="button"
+          data-testid="toggle-search-button"
+          onClick={() => setSearchOpen((s) => !s)}
+          style={{
+            padding: '0.25rem 0.6rem',
+            background: 'transparent',
+            color: colors.textMuted,
+            border: `1px solid ${colors.border}`,
+            borderRadius: radii.sm,
+            cursor: 'pointer',
+            fontSize: '0.85em',
+          }}
+        >
+          {searchOpen
+            ? t('messages.search_clear')
+            : t('messages.search_button')}
+        </button>
       </header>
+
+      {searchOpen && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            void onSearch()
+          }}
+          data-testid="search-form"
+          style={{
+            display: 'flex',
+            gap: '0.5rem',
+            padding: '0.5rem 1rem',
+            borderBottom: `1px solid ${colors.border}`,
+            background: colors.sidebar,
+          }}
+        >
+          <input
+            data-testid="search-input"
+            placeholder={t('messages.search_placeholder') ?? ''}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '0.4rem 0.6rem',
+              background: colors.input,
+              color: colors.text,
+              border: 'none',
+              borderRadius: radii.sm,
+            }}
+          />
+          <button
+            type="submit"
+            data-testid="search-submit"
+            disabled={searchLoading || !searchQuery.trim()}
+            style={{
+              padding: '0.4rem 0.8rem',
+              background: colors.blurple,
+              color: colors.textHeader,
+              border: 'none',
+              borderRadius: radii.sm,
+              cursor: 'pointer',
+            }}
+          >
+            {searchLoading
+              ? t('messages.search_loading')
+              : t('messages.search_button')}
+          </button>
+        </form>
+      )}
+
+      {searchOpen && searchResults !== null && (
+        <div
+          data-testid="search-results"
+          style={{
+            padding: '0.5rem 1rem',
+            borderBottom: `1px solid ${colors.border}`,
+            background: colors.sidebar,
+            maxHeight: 200,
+            overflowY: 'auto',
+          }}
+        >
+          <p
+            style={{
+              margin: '0 0 0.4rem 0',
+              fontSize: '0.8em',
+              color: colors.textMuted,
+            }}
+          >
+            {searchResults.length === 1
+              ? t('messages.search_results_title', { count: searchResults.length })
+              : t('messages.search_results_title_plural', { count: searchResults.length })}
+          </p>
+          {searchResults.length === 0 && (
+            <p
+              style={{ color: colors.textMuted, fontSize: '0.9em', margin: 0 }}
+            >
+              {t('messages.search_no_results')}
+            </p>
+          )}
+          {searchResults.map((hit) => (
+            <div
+              key={hit.rw_id}
+              data-testid={`search-hit-${hit.rw_id}`}
+              style={{
+                padding: '0.4rem 0',
+                borderTop: `1px solid ${colors.border}`,
+                fontSize: '0.9em',
+              }}
+            >
+              <span
+                // The highlight comes from ts_headline with
+                // <mark>...</mark> around matches. That's the only
+                // HTML we trust the server to emit. A future
+                // hardening step would add a DOMPurify pass on the
+                // server-rendered body for paranoid defence.
+                dangerouslySetInnerHTML={{ __html: hit.rw_highlight }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
 
       <div
         ref={listRef}

@@ -31,6 +31,8 @@ from uuid import UUID
 from .domain import (
     Message,
     MessageRepository,
+    SearchHit,
+    SearchRepository,
     SessionFactory,
 )
 from .infrastructure import RwSession
@@ -315,3 +317,135 @@ class MarkRead:
         with RwSession(self._session_factory, actor_id=actor_id) as conn:
             repo = self._message_repo_factory(conn)
             return repo.mark_read(message_id=message_id, user_id=actor_id)
+
+
+# ─── Phase 5: search + bulk mark-read + per-channel unread ──────────────
+
+
+@dataclass(frozen=True)
+class SearchHitSummary:
+    """Wire shape for one search result. The `rw_highlight` field is
+    HTML — the frontend renders it as `dangerouslySetInnerHTML` after
+    a sanitization pass on `<mark>` only (Phase 5 leaves the full body
+    un-escaped for the regex-free path; the React render uses the
+    `rw_body` field for the fallback)."""
+
+    rw_id: UUID
+    rw_channel_id: UUID
+    rw_author_id: UUID
+    rw_body: str
+    rw_created_at: datetime
+    rw_highlight: str
+    is_mine: bool
+
+
+class SearchMessages:
+    """Phase 5: lexical search in one channel with `ts_headline`.
+
+    The DB function `rw_search_messages(...)` does the heavy lifting:
+    locale is pulled from `rw_user.rw_locale`, the highlight uses
+    `<mark>` tags, and a non-member gets an empty result set (the
+    function checks channel membership as defense in depth because
+    SECURITY DEFINER bypasses RLS).
+
+    The use case validates input + projects the entity. It does NOT
+    sort, filter, or rewrite the highlight — that's the DB's job.
+    """
+
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        search_repo_factory: Callable[..., SearchRepository],
+        max_limit: int = 50,
+    ) -> None:
+        self._session_factory = session_factory
+        self._search_repo_factory = search_repo_factory
+        self._max_limit = max_limit
+
+    def __call__(
+        self,
+        *,
+        actor_id: UUID,
+        channel_id: UUID,
+        query: str,
+        limit: int = 20,
+    ) -> list[SearchHitSummary]:
+        if not (1 <= len(query) <= 200):
+            raise MessageError(
+                "invalid-query", "query length must be 1..200"
+            )
+        if limit < 1 or limit > self._max_limit:
+            raise MessageError(
+                "invalid-limit",
+                f"limit must be 1..{self._max_limit}",
+            )
+
+        with RwSession(self._session_factory, actor_id=actor_id) as conn:
+            repo = self._search_repo_factory(conn)
+            hits = repo.search_in_channel(
+                channel_id=channel_id, query=query, limit=limit
+            )
+
+        return [
+            SearchHitSummary(
+                rw_id=h.rw_id,
+                rw_channel_id=h.rw_channel_id,
+                rw_author_id=h.rw_author_id,
+                rw_body=h.rw_body,
+                rw_created_at=h.rw_created_at,
+                rw_highlight=h.rw_highlight,
+                is_mine=h.rw_author_id == actor_id,
+            )
+            for h in hits
+        ]
+
+
+class MarkChannelRead:
+    """Phase 5: bulk mark all visible messages in a channel as read.
+
+    Used when the user opens the conversation view; the channel's
+    unread badge clears on the next `list_visible_with_unread()` call.
+    Idempotent (the DB UNIQUE constraint swallows the no-op inserts).
+    """
+
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        message_repo_factory: Callable[..., MessageRepository],
+    ) -> None:
+        self._session_factory = session_factory
+        self._message_repo_factory = message_repo_factory
+
+    def __call__(self, *, actor_id: UUID, channel_id: UUID) -> int:
+        with RwSession(self._session_factory, actor_id=actor_id) as conn:
+            repo = self._message_repo_factory(conn)
+            return repo.mark_channel_read(
+                channel_id=channel_id, user_id=actor_id
+            )
+
+
+class UnreadCountForChannel:
+    """Phase 5: get the actor's unread count for one channel.
+
+    Kept as a dedicated use case (not just an inline repo call from
+    the router) so the cache / pre-compute paths Phase 7 introduces
+    don't reach across layers.
+    """
+
+    def __init__(
+        self,
+        session_factory: SessionFactory,
+        *,
+        message_repo_factory: Callable[..., MessageRepository],
+    ) -> None:
+        self._session_factory = session_factory
+        self._message_repo_factory = message_repo_factory
+
+    def __call__(self, *, actor_id: UUID, channel_id: UUID) -> int:
+        with RwSession(self._session_factory, actor_id=actor_id) as conn:
+            repo = self._message_repo_factory(conn)
+            return repo.unread_count_for_channel(
+                channel_id=channel_id, user_id=actor_id
+            )

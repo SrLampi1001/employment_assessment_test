@@ -41,6 +41,8 @@ from .domain import (
     PasswordHasher,
     RefreshTokenRecord,
     RefreshTokenStore,
+    SearchHit,
+    SearchRepository,
     SessionFactory,
     User,
     UserRepository,
@@ -309,6 +311,48 @@ class PostgresChannelRepository:
             )
             return cur.fetchone()[0]
 
+    def list_visible_with_unread(
+        self,
+    ) -> list[tuple[Channel, ChannelMember, int]]:
+        """Phase 5: list visible channels with the actor's per-channel
+        unread count.
+
+        The unread count is computed per channel via
+        `rw_unread_count_for_channel(...)` (Phase 5, 0120). The
+        function is SECURITY DEFINER with explicit membership +
+        GUC-actor checks, so the count is correctly zero for
+        non-members (defense in depth on top of RLS).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT ch.rw_id, ch.rw_name, ch.rw_kind, ch.rw_created_by, "
+                "       ch.rw_created_at, "
+                "       m.rw_id, m.rw_channel_id, m.rw_user_id, m.rw_role, "
+                "       m.rw_joined_at, m.rw_left_at "
+                "FROM rw_channel ch "
+                "JOIN rw_channel_member m ON m.rw_channel_id = ch.rw_id "
+                "WHERE m.rw_left_at IS NULL "
+                "ORDER BY ch.rw_created_at DESC"
+            )
+            rows = cur.fetchall()
+            out: list[tuple[Channel, ChannelMember, int]] = []
+            for r in rows:
+                channel = Channel(
+                    rw_id=r[0], rw_name=r[1], rw_kind=r[2],
+                    rw_created_by=r[3], rw_created_at=r[4],
+                )
+                membership = ChannelMember(
+                    rw_id=r[5], rw_channel_id=r[6], rw_user_id=r[7],
+                    rw_role=r[8], rw_joined_at=r[9], rw_left_at=r[10],
+                )
+                cur.execute(
+                    "SELECT rw_unread_count_for_channel(%s, %s)",
+                    (channel.rw_id, membership.rw_user_id),
+                )
+                unread = cur.fetchone()[0] or 0
+                out.append((channel, membership, int(unread)))
+            return out
+
 
 class PostgresChannelMemberRepository:
     def __init__(self, conn: Connection) -> None:
@@ -509,6 +553,32 @@ class PostgresMessageRepository:
             )
             return cur.fetchone() is not None
 
+    def unread_count_for_channel(
+        self, *, channel_id: UUID, user_id: UUID
+    ) -> int:
+        """Phase 5: thin wrapper around `rw_unread_count_for_channel`.
+        Returns 0 for non-members (the DB function enforces it).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_unread_count_for_channel(%s, %s)",
+                (channel_id, user_id),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
+    def mark_channel_read(self, *, channel_id: UUID, user_id: UUID) -> int:
+        """Phase 5: thin wrapper around `rw_mark_channel_read`.
+        Returns the number of rows actually inserted.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT rw_mark_channel_read(%s, %s)",
+                (channel_id, user_id),
+            )
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+
     @staticmethod
     def _row_to_message(row: tuple) -> Message:
         return Message(
@@ -531,6 +601,42 @@ class PostgresMessageRepository:
 # uses this shift implicitly; tests and other callers can use it too.
 def _row_to_message_from_send(row10: tuple) -> Message:
     return PostgresMessageRepository._row_to_message(row10)
+
+
+class PostgresSearchRepository:
+    """Phase 5: thin wrapper around `rw_search_messages(...)`.
+
+    The DB function handles everything important (locale pull from
+    rw_user, ts_headline, RLS-bypass defense-in-depth membership
+    check). This adapter is a one-liner.
+    """
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def search_in_channel(
+        self, *, channel_id: UUID, query: str, limit: int
+    ) -> list[SearchHit]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT out_rw_id, out_rw_channel_id, out_rw_author_id, "
+                "       out_rw_body, out_rw_created_at, out_rw_highlight "
+                "FROM rw_search_messages(%s, %s, %s, "
+                "       current_setting('app.current_user_id', true)::uuid)",
+                (channel_id, query, limit),
+            )
+            rows = cur.fetchall()
+            return [
+                SearchHit(
+                    rw_id=r[0],
+                    rw_channel_id=r[1],
+                    rw_author_id=r[2],
+                    rw_body=r[3],
+                    rw_created_at=r[4],
+                    rw_highlight=r[5],
+                )
+                for r in rows
+            ]
 
 
 class PostgresRefreshTokenStore:

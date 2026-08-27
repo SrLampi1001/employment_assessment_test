@@ -13,6 +13,11 @@ interface Props {
   username: string
   selectedChannelId: string | null
   onSelect: (channelId: string) => void
+  /** Phase 5: bumped by the parent (App.tsx) every time something
+   *  elsewhere changes the actor's read-state — e.g. the
+   *  Conversation view calls `markChannelRead` on mount. The
+   *  ChannelList watches this counter and refetches. */
+  refreshTrigger?: number
 }
 
 export function ChannelList({
@@ -20,6 +25,7 @@ export function ChannelList({
   username,
   selectedChannelId,
   onSelect,
+  refreshTrigger,
 }: Props) {
   const { t } = useTranslation()
   const [channels, setChannels] = useState<Channel[]>([])
@@ -38,8 +44,21 @@ export function ChannelList({
     }
   }
 
+  // Refresh on mount + when the access token changes (new login)
+  // + when the parent bumps the trigger (Conversation marked a
+  // channel as read → unread badge needs to clear).
   useEffect(() => {
     void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, refreshTrigger])
+
+  // Periodically poll for new messages (10 s) so the unread badge
+  // updates without requiring a manual refresh. Phase 6 swaps this
+  // for a WebSocket / Server-Sent-Events channel.
+  useEffect(() => {
+    const id = setInterval(() => void refresh(), 10000)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken])
 
   async function onCreateGroup(e: FormEvent) {
@@ -100,14 +119,33 @@ export function ChannelList({
         minHeight: 0,
       }}
     >
+      {/* Unread total badge in the header — the small number next
+          to "Conversations" is the sum of all unread_count values. */}
       <header
         style={{
           padding: '0.75rem 1rem',
           borderBottom: '1px solid #202225',
           fontWeight: 600,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
         }}
       >
-        {t('channels.title')}
+        <span>{t('channels.title')}</span>
+        {channels.some((c) => c.unread_count > 0) && (
+          <span
+            data-testid="total-unread"
+            style={{
+              fontSize: '0.75em',
+              padding: '0.15rem 0.5rem',
+              background: '#ED4245',
+              color: '#FFFFFF',
+              borderRadius: 8,
+            }}
+          >
+            {channels.reduce((s, c) => s + c.unread_count, 0)}
+          </span>
+        )}
       </header>
       <p
         style={{
@@ -144,6 +182,7 @@ export function ChannelList({
               key={c.channel_id}
               data-testid={`channel-${c.name}`}
               data-channel-id={c.channel_id}
+              data-unread-count={c.unread_count}
             >
               <button
                 type="button"
@@ -172,15 +211,37 @@ export function ChannelList({
                   </small>
                 </span>
                 <span
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    void onLeave(c.channel_id)
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 4,
                   }}
-                  style={{ fontSize: '0.8em', color: '#72767D', padding: '0 4px' }}
                 >
-                  ✕
+                  {c.unread_count > 0 && (
+                    <span
+                      data-testid={`unread-badge-${c.name}`}
+                      style={{
+                        fontSize: '0.75em',
+                        padding: '0.1rem 0.45rem',
+                        background: '#ED4245',
+                        color: '#FFFFFF',
+                        borderRadius: 8,
+                      }}
+                    >
+                      {c.unread_count}
+                    </span>
+                  )}
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void onLeave(c.channel_id)
+                    }}
+                    style={{ fontSize: '0.8em', color: '#72767D', padding: '0 4px' }}
+                  >
+                    ✕
+                  </span>
                 </span>
               </button>
             </li>

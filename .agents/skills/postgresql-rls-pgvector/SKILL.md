@@ -204,6 +204,22 @@ RETURNING * INTO v_msg;
 
 See [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../../db/migrations/0110_rw_send_message_replay_flag.sql).
 
+## Step 9.7: ts_headline + per-channel unread + bulk mark-read
+
+Three SECURITY DEFINER functions added in Phase 5 (`db/migrations/0120_rw_search_messages.sql`):
+
+- `rw_search_messages(p_channel_id, p_query, p_limit, p_actor_id)` → `TABLE` with `ts_headline` highlight (`<mark>…</mark>` around matches). Locale is pulled from `rw_user.rw_locale` (NOT from a parameter the client can lie about, NOT hardcoded). See [`db/migrations/0120_rw_search_messages.sql`](../../db/migrations/0120_rw_search_messages.sql) — one-line summary: 3 SECURITY DEFINER functions, all with GUC-actor + channel-membership defense-in-depth checks because SECURITY DEFINER bypasses RLS.
+- `rw_unread_count_for_channel(p_channel_id, p_user_id)` → `integer` — counts visible messages NOT in `rw_message_read` for that user. Returns `0` for non-members (defense in depth, since SECURITY DEFINER bypasses RLS).
+- `rw_mark_channel_read(p_channel_id, p_user_id)` → `integer` — single `INSERT … SELECT … WHERE NOT EXISTS … ON CONFLICT DO NOTHING RETURNING` statement. Idempotent (the UNIQUE constraint on `(rw_message_id, rw_user_id)` swallows duplicates). Returns the count of newly-inserted rows.
+
+**Three gotchas to know about** (caught + fixed while building Phase 5):
+
+1. **`char(2)` does not resolve the `(regconfig, text)` overload of `plainto_tsquery` / `to_tsvector` / `ts_headline`.** `rw_user.rw_locale` is `char(2)` in the schema (values `'es'`/`'en'`), but the function signature is `(regconfig, text)`. Naive `plainto_tsquery(rw_locale, ...)` raises `function plainto_tsquery(character, text) does not exist`. Fix: expand `'es'`/`'en'` to `'spanish'`/`'english'` (with a `'simple'` fallback) in the function body and cast `v_locale::regconfig` at every FTS call site.
+2. **SECURITY DEFINER bypasses RLS — explicit membership check is mandatory.** Without `IF NOT EXISTS (SELECT 1 FROM rw_channel_member WHERE ...)` at the top of each function, a non-member could call `rw_search_messages(their_channel_id=...with_other_users_only)` and bypass RLS entirely. The GUC actor check (`p_actor_id = current_setting('app.current_user_id', true)::uuid`) is also required.
+3. **The migration is `DROP FUNCTION IF EXISTS` + `CREATE FUNCTION` (NOT `CREATE OR REPLACE FUNCTION`).** Because the function signatures changed (e.g. Phase 4 added the `out_was_replay` OUT parameter), `CREATE OR REPLACE` refuses if the OUT parameter list differs. `DROP` then `CREATE` is the only safe path. Same pattern applies if a future phase adds new functions.
+
+See the `Search messages + per-channel unread + bulk mark-read` use case in [`/backend/app/messages.py`](../../backend/app/messages.py) — one-line summary: `SearchMessages` validates input (query 1..200, limit 1..50) and projects hits with the actor's `is_mine` flag; `MarkChannelRead` is a thin dispatcher around `repo.mark_channel_read`.
+
 ## Step 10: Seed / Bronze–Silver (ARCHITECTURE §9)
 
 Even for a one-shot load, Bronze keeps the seed as received (auditable, immutable). Silver is the 3FN model.

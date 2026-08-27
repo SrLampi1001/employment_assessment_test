@@ -225,6 +225,17 @@ RW_DATABASE_URL="postgresql://rw_app_login:dev_app_pwd@localhost:5433/db_santiag
 
 Tests use `create_app(settings=..., session_factory=...)` directly; `dev_app.py` is the dev-server seam.
 
+### 4.10 Search + mark-channel-read endpoints (Phase 5)
+
+Two new routes on the messages router (Phase 5, issue #9):
+
+- `GET /api/v1/channels/{channel_id}/search?q=&limit=` — `SearchMessages` use case. The DB function `rw_search_messages(...)` does the heavy lifting (locale from `rw_user.rw_locale`, `ts_headline` with `<mark>` tags, RLS-bypass defense-in-depth check). The route validates `q` 1..200 chars and `limit` 1..50. Returns `{ items: [{rw_id, rw_channel_id, rw_author_id, rw_body, rw_created_at, rw_highlight, is_mine}, …] }`.
+- `POST /api/v1/channels/{channel_id}/read` — `MarkChannelRead` use case. Bulk-marks every visible message as read for the actor. Idempotent. Returns `{ inserted: <n> }` (the count of newly-inserted rows; useful for the API response shape but currently unused by the frontend).
+
+The channel list endpoint (`GET /api/v1/channels`) gained an `unread_count: int` field per channel — backed by `rw_unread_count_for_channel(channel_id, user_id)` called once per channel inside `PostgresChannelRepository.list_visible_with_unread`. The frontend renders the per-channel badge + a total badge in the header.
+
+See [`/backend/app/delivery.py:build_messages_router`](../../backend/app/delivery.py) — the Phase 4 `SearchHitOut` + `MarkChannelReadOut` Pydantic models are declared inside `build_messages_router` (the pattern is "wire shape next to the route that returns it"). For more on the DB-side contract, see `Step 9.7` of the postgres-rls-pgvector skill.
+
 ## Step 5: Testing — BDD against real PostgreSQL
 
 pytest-bdd + testcontainers-python. The two mandatory scenarios from `ARCHITECTURE.md §10` are the executable spec.
