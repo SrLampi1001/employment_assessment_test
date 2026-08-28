@@ -1,0 +1,32 @@
+# Line-ending policy for the repo.
+#
+# Without this file, `git config core.autocrlf true` (the default on
+# Windows) would re-introduce CRLF in any shell script that gets
+# authored or edited on Windows. That is harmless for Python / Node /
+# SQL (the interpreters don't care), but it silently breaks Linux-side
+# shell scripts: bash sees `set -euo pipefail\r` and aborts with
+# `set: pipefail: invalid option name`. The exact failure mode we hit
+# on db/migrate.sh — the bash `set` builtin reads `\r` as part of the
+# option name and the script never runs.
+#
+# `text=auto` makes git normalise line endings on commit/checkout
+# based on a content heuristic — it's the default for most files.
+# For files that MUST stay LF (scripts that run inside Linux
+# containers), we pin `text eol=lf` so `core.autocrlf=true` is
+# overruled for those paths.
+#
+# See: https://docs.github.com/en/get-started/getting-started-with-git/configuring-git-to-handle-line-endings
+
+*               text=auto
+
+# Shell scripts and Dockerfiles run inside Linux containers — they
+# MUST be LF regardless of the host OS or `core.autocrlf`.
+*.sh            text eol=lf
+*.bash          text eol=lf
+Dockerfile      text eol=lf
+**/Dockerfile   text eol=lf
+*.dockerfile    text eol=lf
+
+# PowerShell scripts only run on Windows, so CRLF is the safe default.
+*.ps1           text eol=crlf
+*.psm1          text eol=crlf
