@@ -1,19 +1,25 @@
-# Phase 0 — local development stack.
-# Phase 0 only brings up the database. Backend + frontend services land in
-# Phase 2 (auth) and Phase 3 (channels) respectively.
+# Local development stack — db + migrate + seed + backend + frontend.
+#
+# `docker compose up` boots the whole platform with no manual steps
+# (ARCHITECTURE.md §11): the db container bootstraps extensions + roles,
+# the `migrate` service applies the schema + RLS + functions, the `seed`
+# service loads the Bronze → Silver corpus, then `backend` (FastAPI) and
+# `frontend` (Vite dev) come up.
 #
 # All ports and credentials are sourced from `.env` at the project root
 # (with `${VAR:-default}` fallbacks so the stack still boots if `.env`
 # is missing). See docs/DECISIONS.md "Phase 0 — No hardcoded ports".
 #
 # Run from the project root:
-#   docker compose up -d
+#   docker compose up --build
 # Then verify:
-#   docker compose exec db psql -U postgres -d riwi -c "\dx"
-#   docker compose exec db psql -U postgres -d riwi -c "\du rw_app"
-#   docker compose exec db psql -U postgres -d riwi -tAc \
-#     "SELECT rolname || ' | super=' || rolsuper || ' | bypassrls=' || rolbypassrls \
-#      FROM pg_roles WHERE rolname IN ('rw_app','rw_app_login','rw_migrator') ORDER BY rolname;"
+#   curl http://localhost:8000/api/v1/...   # backend (BACKEND_PORT)
+#   open  http://localhost:5173             # frontend (FRONTEND_PORT)
+#
+# CORS: the backend's RW_CORS_ORIGINS is set to the browser-visible
+# frontend origin (http://localhost:FRONTEND_PORT), and the frontend's
+# VITE_API_BASE_URL points at http://localhost:BACKEND_PORT so the two
+# agree on each other's host-side ports.
 
 services:
   db:
@@ -24,9 +30,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-db_santiago_sanchez_nakamoto}
     ports:
-      # ${POSTGRES_PORT:-5433}:5432 — internal PG port stays 5432 so
-      # `docker compose exec db psql ...` works exactly as documented;
-      # only the host-side mapping comes from .env.
+      # ${POSTGRES_PORT:-5433}:5432 — internal PG port stays 5432 so the
+      # friends-inside-the-compose-network connect to `db:5432`; only the
+      # host-side mapping comes from .env.
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       # PG18 stores data at /var/lib/postgresql/<version>/data internally;
@@ -34,14 +40,88 @@ services:
       # lay out its own subdirectory (required by PG18+ for `pg_upgrade`
       # compatibility — see docker-library/postgres#1259).
       - db_data:/var/lib/postgresql
-      # Phase 0 init scripts — run on first start only.
+      # Bootstrap scripts — run on first start only (extensions + roles).
       - ./db/migrations/0001_extensions.sql:/docker-entrypoint-initdb.d/001_extensions.sql:ro
       - ./db/migrations/0002_roles.sql:/docker-entrypoint-initdb.d/002_roles.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d riwi"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-db_santiago_sanchez_nakamoto}"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  migrate:
+    # Reuses the pgvector image (ships psql) to apply the schema DDL.
+    image: pgvector/pgvector:pg18
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-db_santiago_sanchez_nakamoto}
+      MIGRATIONS_DIR: /migrations
+    volumes:
+      - ./db/migrations:/migrations:ro
+      - ./db/migrate.sh:/migrate.sh:ro
+    entrypoint: ["bash", "/migrate.sh"]
+    restart: "no"
+
+  seed:
+    # One-shot Bronze → Silver loader (dev-only artifact).
+    build:
+      context: ./backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      SEED_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-db_santiago_sanchez_nakamoto}
+      SEED_PATH: /db/seed/seed.json
+    volumes:
+      - ./db/seed:/db/seed:ro
+    command: ["python", "scripts/seed.py"]
+    restart: "no"
+
+  backend:
+    # FastAPI / Uvicorn dev seam (dev_app.py), RLS-aware.
+    build:
+      context: ./backend
+    container_name: riwi-backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    environment:
+      RW_DATABASE_URL: postgresql://rw_app_login:dev_app_pwd@db:5432/${POSTGRES_DB:-db_santiago_sanchez_nakamoto}
+      RW_JWT_SECRET: ${RW_JWT_SECRET:-dev-only-jwt-secret-do-not-use-in-production}
+      # The two origins the Vite dev server is reachable at from the host.
+      RW_CORS_ORIGINS: http://localhost:${FRONTEND_PORT:-5173},http://127.0.0.1:${FRONTEND_PORT:-5173}
+      # ── Phase 6: AI providers (optional; empty keys → 503 on copilot) ──
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      MISTRAL_EMBED_MODEL: ${MISTRAL_EMBED_MODEL:-mistral-embed}
+      CHAT_MODEL_PRIMARY: ${CHAT_MODEL_PRIMARY:-mistralai/mistral-nemotron}
+      CHAT_MODEL_FALLBACK: ${CHAT_MODEL_FALLBACK:-nvidia/nemotron-3.5-lightning-30b-a3b}
+    ports:
+      # ${BACKEND_PORT:-8000}:8000 — container listens on 8000 (Dockerfile
+      # EXPOSE + uvicorn --port 8000); host-side port comes from .env.
+      - "${BACKEND_PORT:-8000}:8000"
+    restart: unless-stopped
+
+  frontend:
+    # Vite dev server (hot reload).
+    build:
+      context: ./frontend
+    container_name: riwi-frontend
+    depends_on:
+      - backend
+    environment:
+      # Overrides the Dockerfile default so the listener matches the host
+      # mapping below.
+      FRONTEND_PORT: ${FRONTEND_PORT:-5173}
+      # Where the browser should reach the backend (exposed on the host).
+      VITE_API_BASE_URL: http://localhost:${BACKEND_PORT:-8000}
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    restart: unless-stopped
 
 volumes:
   db_data:
