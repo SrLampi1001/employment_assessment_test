@@ -21,6 +21,11 @@ class Settings:
     refresh_ttl_seconds: int
     database_url: str
 
+    # Comma-separated list of allowed CORS origins (RW_CORS_ORIGINS).
+    # Defaults to the Vite dev-server origins so `npm run dev` /
+    # `docker compose up` work without extra config.
+    cors_origins: list[str]
+
     # ── Phase 6: AI providers ────────────────────────────────────────
     # Empty string means "disabled" — the use case treats this as a
     # 503 with "configure MISTRAL_API_KEY in .env" (or NVIDIA_API_KEY).
@@ -50,6 +55,12 @@ class Settings:
                 "RW_DATABASE_URL",
                 "postgresql://rw_app_login:dev_app_pwd@localhost:5433/db_santiago_sanchez_nakamoto",
             ),
+            cors_origins=_parse_origins(
+                getenv(
+                    "RW_CORS_ORIGINS",
+                    "http://localhost:5173,http://127.0.0.1:5173",
+                )
+            ),
             # ── Phase 6 ──
             mistral_api_key=getenv("MISTRAL_API_KEY", ""),
             nvidia_api_key=getenv("NVIDIA_API_KEY", ""),
@@ -69,3 +80,8 @@ class Settings:
                 getenv("CHAT_REQUEST_TIMEOUT_S", "30.0")
             ),
         )
+
+
+def _parse_origins(raw: str) -> list[str]:
+    """Split a comma-separated CORS origin list from the environment."""
+    return [o.strip() for o in raw.split(",") if o.strip()]
