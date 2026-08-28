@@ -12,7 +12,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from .auth import Login, Refresh, RegisterUser
 from .channels import AddMember, CreateChannel, LeaveChannel, ListVisibleChannels
@@ -86,12 +87,15 @@ def create_app(
     """
     app = FastAPI(title="Riwi Co. Messaging Platform")
 
-    # CORS — the Vite dev server lives on a different origin. Phase 7
-    # locks this down to the production frontend origin.
-    origins = cors_origins or [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
+    # CORS — the Vite dev server lives on a different origin. The
+    # allow-list comes from Settings (RW_CORS_ORIGINS) so the ports
+    # stay configurable (no hardcoded ports, per docs/DECISIONS.md);
+    # the defaults match the Vite/localhost dev stack. Phase 7 locks
+    # this down to the production frontend origin. Tests pass
+    # `cors_origins=[]` to disable CORS for in-process calls.
+    origins = (
+        cors_origins if cors_origins is not None else settings.cors_origins
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
@@ -100,6 +104,29 @@ def create_app(
         allow_headers=["*"],
         expose_headers=["X-Idempotent-Replay"],
     )
+
+    # Global handler for the unexpected → a uniform RFC 9457
+    # application/problem+json instead of a bare plain-text 500. Because
+    # handled exceptions are processed inside the CORS middleware stack,
+    # this also keeps the Access-Control-Allow-Origin header on error
+    # responses — otherwise Starlette's ServerErrorMiddleware (which sits
+    # outside CORSMiddleware) strips it and the browser reports a
+    # misleading "No 'Access-Control-Allow-Origin' header" that hides the
+    # real error. Domain errors (AuthError, ChannelError, MessageError,
+    # CopilotError) are caught in their routes and never reach here.
+    @app.exception_handler(Exception)
+    async def _unhandled_exception_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "type": "about:blank",
+                "title": "Internal Server Error",
+                "status": 500,
+                "detail": str(exc) or "unhandled server error",
+            },
+        )
 
     jwt_service = PyJwtService(
         settings.jwt_secret,

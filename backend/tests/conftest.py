@@ -202,6 +202,11 @@ def http_client(pg_app_session_factory, pg_app_url: str):
         access_ttl_seconds=900,
         refresh_ttl_seconds=3600,
         database_url=pg_app_url,
+        # CORS is irrelevant for in-process TestClient calls (no
+        # real origin), so the allow-list is empty — `create_app`
+        # reads `settings.cors_origins` directly and the
+        # CORSMiddleware no-ops when the list is empty.
+        cors_origins=[],
         # Phase 6: AI providers — empty strings in tests so the
         # main factory falls back to the "ai-not-configured" stubs.
         # We override the embedder + chatter below with fakes so
