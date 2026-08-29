@@ -198,7 +198,7 @@ def http_client(pg_app_session_factory, pg_app_url: str):
     from tests.fake_chat_provider import FakeChatProvider, FakeEmbeddingProvider
 
     settings = Settings(
-        jwt_secret="test-jwt-secret",
+        jwt_secret="test-jwt-secret-with-multiple-characters",
         access_ttl_seconds=900,
         refresh_ttl_seconds=3600,
         database_url=pg_app_url,
