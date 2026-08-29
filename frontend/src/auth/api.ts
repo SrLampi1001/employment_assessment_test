@@ -89,12 +89,17 @@ export async function me(): Promise<AuthUser> {
   // just store what the search endpoint returns for the actor's
   // username later. Simpler: keep user state on the client.
   const cached = getUser()
-  return (
-    cached ?? {
-      rw_id: body.actor_id,
-      rw_username: 'me',
-      rw_display_name: 'me',
-      rw_locale: 'es',
-    }
-  )
+  return cached ?? {
+    rw_id: body.actor_id,
+    // TODO: remove fallback once PATCH /api/v1/me returns a full
+    // AuthUser (issue #26 on GitHub). Currently rw_username and
+    // rw_display_name are not surfaced anywhere in the UI so the
+    // fallback values are never visible.
+    rw_username: 'me',
+    rw_display_name: 'me',
+    // Intentionally 'es' — the language toggle persists to localStorage
+    // via App.tsx onToggle; this fallback is only hit on a completely
+    // fresh browser with no localStorage.
+    rw_locale: 'es',
+  }
 }

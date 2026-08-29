@@ -70,8 +70,8 @@ export function LoginPanel({ onAuthenticated }: Props) {
         onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
       >
         {mode === 'login'
-          ? t('auth.create_account')
-          : t('auth.back_to_sign_in')}
+          ? t('app.mode.login')
+          : t('app.mode.register')}
       </button>
       {error && <p style={{ color: 'crimson' }}>{error}</p>}
     </form>

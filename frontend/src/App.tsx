@@ -98,9 +98,13 @@ export default function App() {
           <button
             type="button"
             data-testid="lang-toggle"
-            onClick={() =>
-              i18n.changeLanguage(i18n.language === 'es' ? 'en' : 'es')
-            }
+            onClick={() => {
+              const next = i18n.language === 'es' ? 'en' : 'es'
+              i18n.changeLanguage(next)
+              localStorage.setItem('rw_locale', next)
+              // TODO: once PATCH /api/v1/me exists (issue #26), call
+              // api.patchMe({ locale: next }) here to persist server-side.
+            }}
             style={{
               padding: '0.3rem 0.6rem',
               background: 'transparent',
@@ -110,7 +114,7 @@ export default function App() {
               cursor: 'pointer',
             }}
           >
-            {i18n.language === 'es' ? 'EN' : 'ES'}
+            {i18n.language === 'es' ? t('app.lang.en') : t('app.lang.es')}
           </button>
           {username && (
             <button
