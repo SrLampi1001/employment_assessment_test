@@ -24,7 +24,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 
 # Hard-coded identifiers so the feature file (Given "Valentina", "Camila")
