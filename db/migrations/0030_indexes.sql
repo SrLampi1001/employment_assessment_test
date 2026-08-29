@@ -23,6 +23,11 @@ CREATE INDEX IF NOT EXISTS ix_rw_message_channel_created
     ON rw_message (rw_channel_id, rw_created_at DESC, rw_id DESC);
 
 -- Unread count backing index (Phase 5 will query this).
+-- ARCH §2.4 mandates (rw_user_id, rw_channel_id); this index lands in
+-- migration 0130 after the column is added. Until then we keep the
+-- original (rw_user_id, rw_message_id) index that supports the Phase 5
+-- shipped queries (the lead column is the discriminator for the
+-- unread-count subquery in app/application/messages/queries.py).
 CREATE INDEX IF NOT EXISTS ix_rw_message_read_user_message
     ON rw_message_read (rw_user_id, rw_message_id);
 
