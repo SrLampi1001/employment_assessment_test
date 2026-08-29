@@ -504,7 +504,13 @@ _STATUS_MAP = {
     "invalid-reason": status.HTTP_400_BAD_REQUEST,
     "invalid-limit": status.HTTP_400_BAD_REQUEST,
     "message-not-found": status.HTTP_404_NOT_FOUND,
-    "not-author": status.HTTP_403_FORBIDDEN,
+    # "not-author" intentionally absent: per ARCHITECTURE.md §3 +
+    # issue #23, a non-author attempting to edit/delete a message
+    # is indistinguishable from a non-existent message to avoid an
+    # existence leak. The PATCH and DELETE routes in
+    # `build_messages_router` therefore return 404 when the
+    # rw_message_update / rw_delete_message procedures affect zero
+    # rows — RLS already rejected the actor.
     "idempotent-replay": status.HTTP_200_OK,
     # ── Phase 5 search + read codes ────────────────────────────────────
     "invalid-query": status.HTTP_400_BAD_REQUEST,

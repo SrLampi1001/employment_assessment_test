@@ -119,6 +119,11 @@ $$;
 -- rw_edit_message — REQUIRED procedure #1 (ARCHITECTURE.md §3).
 -- Appends a rw_message_edit row and updates rw_message in place. Never
 -- physically deletes the previous body.
+--
+-- Per issue #23, the procedure refuses non-author edits (0 rows updated).
+-- The application layer maps that to 404 so a non-author cannot
+-- distinguish "message does not exist" from "you are not the author" —
+-- no existence leak.
 -- ─────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE PROCEDURE rw_edit_message(
     p_message_id  uuid,
@@ -128,9 +133,34 @@ CREATE OR REPLACE PROCEDURE rw_edit_message(
 LANGUAGE plpgsql
 SECURITY DEFINER
 AS $$
+DECLARE
+    v_author_id uuid;
 BEGIN
     IF p_editor_id IS DISTINCT FROM current_setting('app.current_user_id', true)::uuid THEN
         RAISE EXCEPTION 'rw_edit_message: editor mismatch with actor GUC';
+    END IF;
+
+    -- ── Author gate (issue #23) ─────────────────────────────────────
+    -- The function runs as the function owner (postgres in dev,
+    -- rw_migrator in prod), which BYPASSES RLS. The rw_message_update
+    -- RLS policy that requires rw_author_id = GUC does NOT fire
+    -- inside this procedure body. We re-enforce it explicitly so
+    -- a non-author can never overwrite someone else's message even
+    -- by calling the function directly.
+    SELECT rw_author_id INTO v_author_id
+    FROM rw_message
+    WHERE rw_id = p_message_id AND rw_deleted_at IS NULL;
+
+    IF v_author_id IS NULL THEN
+        -- Message does not exist OR is already deleted; the application
+        -- maps this to 404 (no existence leak).
+        RETURN;
+    END IF;
+
+    IF v_author_id <> p_editor_id THEN
+        -- The actor is not the author; refuse silently so the
+        -- application surfaces 404, not 403.
+        RETURN;
     END IF;
 
     INSERT INTO rw_message_edit (rw_message_id, rw_body, rw_editor_id)
@@ -150,6 +180,9 @@ $$;
 -- Logical delete only. Sets rw_deleted_at + rw_deleted_reason (both,
 -- per the CHECK constraint). The row stays in rw_message so the audit
 -- trail is preserved (AGENTS.md / Prohibited Actions).
+--
+-- Per issue #23, the procedure refuses non-author deletes (0 rows
+-- updated). The application maps that to 404.
 -- ─────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE PROCEDURE rw_delete_message(
     p_message_id  uuid,
