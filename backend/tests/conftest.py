@@ -285,7 +285,8 @@ def _seed(super_conn: psycopg.Connection) -> None:
     with super_conn.cursor() as cur:
         cur.execute(
             "TRUNCATE rw_message, rw_message_edit, rw_message_read, "
-            "rw_channel_member, rw_channel, rw_user CASCADE"
+            "rw_channel_member, rw_channel, rw_user, "
+            "rw_copilot_usage, rw_refresh_token CASCADE"
         )
         cur.executemany(
             "INSERT INTO rw_user (rw_id, rw_username, rw_display_name, rw_locale) "
