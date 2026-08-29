@@ -220,7 +220,7 @@ def protected_with_expired_token(http_client: httpx.Client, ctx: dict):
         "exp": int(past.timestamp()),
         "type": "access",
     }
-    token = jwt.encode(payload, "test-jwt-secret", algorithm="HS256")
+    token = jwt.encode(payload, "test-jwt-secret-with-multiple-characters", algorithm="HS256")
     resp = http_client.get(
         "/api/v1/me",
         headers={"Authorization": f"Bearer {token}"},
@@ -239,7 +239,7 @@ def protected_with_tampered_token(http_client: httpx.Client, ctx: dict):
         "exp": int((now + timedelta(minutes=15)).timestamp()),
         "type": "access",
     }
-    token = jwt.encode(payload, "test-jwt-secret", algorithm="HS256")
+    token = jwt.encode(payload, "test-jwt-secret-with-multiple-characters", algorithm="HS256")
     tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
     resp = http_client.get(
         "/api/v1/me",

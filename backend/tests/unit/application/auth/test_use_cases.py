@@ -171,7 +171,7 @@ def _user(username="alice", user_id=None):
 
 
 def _jwt_service() -> PyJwtService:
-    return PyJwtService("test-secret", access_ttl_seconds=900)
+    return PyJwtService("test-secret-with-multiple-characters", access_ttl_seconds=900)
 
 
 def _hasher() -> Argon2idHasher:
@@ -213,7 +213,7 @@ def test_access_jwt_carries_sub_only() -> None:
     uid = uuid4()
     token = svc.issue_access(uid)
 
-    payload = pyjwt.decode(token, "test-secret", algorithms=["HS256"])
+    payload = pyjwt.decode(token, "test-secret-with-multiple-characters", algorithms=["HS256"])
     assert payload["sub"] == str(uid)
     assert payload["type"] == "access"
     # No role / membership / admin claims ever.
@@ -234,7 +234,7 @@ def test_decode_access_rejects_token_with_wrong_type() -> None:
         "exp": int((now + timedelta(hours=1)).timestamp()),
         "type": "refresh",
     }
-    token = pyjwt.encode(refresh_payload, "test-secret", algorithm="HS256")
+    token = pyjwt.encode(refresh_payload, "test-secret-with-multiple-characters", algorithm="HS256")
     svc = _jwt_service()
     with pytest.raises(pyjwt.InvalidTokenError, match="unexpected token type"):
         svc.decode_access(token)
@@ -250,7 +250,7 @@ def test_decode_access_rejects_expired_token() -> None:
         "exp": int(past.timestamp()),
         "type": "access",
     }
-    token = pyjwt.encode(payload, "test-secret", algorithm="HS256")
+    token = pyjwt.encode(payload, "test-secret-with-multiple-characters", algorithm="HS256")
     svc = _jwt_service()
     with pytest.raises(pyjwt.ExpiredSignatureError):
         svc.decode_access(token)
