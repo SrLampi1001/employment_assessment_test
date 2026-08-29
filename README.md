@@ -109,7 +109,7 @@
    ```bash
    docker compose up -d
    # Apply migrations & seed data
-   docker exec -it backend sh -c "npm run migrate"
+    docker compose run migrate
    ```
 4. **Access**:
    - Frontend: `http://localhost:3000` — The port can change based on your own .env configuration
