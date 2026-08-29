@@ -65,3 +65,26 @@ Feature: Messages — idempotent send / edit / logical delete / keyset history /
     When the user requests the history of "private"
     Then the response status is 200
     And the history contains 0 items
+
+  # ─── Issue #23: non-author must see 404 (no existence leak) ──────
+  Scenario: Non-author gets 404 from PATCH /messages/{id} (not 403)
+    Given a user with username alice and password secret exists
+    And a user with username bob and password secret exists
+    And the user has logged in with username alice and password secret
+    And the user has created a group channel named "team"
+    And the user has sent a message to "team" with client_ref "ref-leak" and body "alice wrote this"
+    And the user logs in with username bob and password secret
+    When the user edits that message with body "bob hijacks"
+    Then the response status is 404
+    And the original message body is unchanged
+
+  Scenario: Non-author gets 404 from POST /messages/{id}/delete (not 403)
+    Given a user with username alice and password secret exists
+    And a user with username bob and password secret exists
+    And the user has logged in with username alice and password secret
+    And the user has created a group channel named "team"
+    And the user has sent a message to "team" with client_ref "ref-leak-del" and body "alice wrote this"
+    And the user logs in with username bob and password secret
+    When the user logically deletes that message with reason "user-deleted"
+    Then the response status is 404
+    And the original message is not marked deleted
