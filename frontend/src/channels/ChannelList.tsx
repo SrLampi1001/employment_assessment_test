@@ -234,6 +234,7 @@ export function ChannelList({
                   <span
                     role="button"
                     tabIndex={0}
+                    aria-label={t('channels.leave_action')}
                     onClick={(e) => {
                       e.stopPropagation()
                       void onLeave(c.channel_id)

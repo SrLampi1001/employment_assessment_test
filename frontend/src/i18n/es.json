@@ -1,6 +1,14 @@
 {
   "app": {
-    "title": "Riwi Co. — Mensajería interna"
+    "title": "Riwi Co. — Mensajería interna",
+    "mode": {
+      "login": "Crear cuenta",
+      "register": "Volver a iniciar sesión"
+    },
+    "lang": {
+      "en": "EN",
+      "es": "ES"
+    }
   },
   "auth": {
     "login": "Iniciar sesión",
@@ -23,6 +31,7 @@
     "other_username": "Usuario con quien conversar",
     "cancel": "Cancelar",
     "leave": "Salir",
+    "leave_action": "Salir del canal",
     "owner_badge": "Propietario",
     "member_badge": "Miembro",
     "unread_badge": "{{count}} nuevos"
