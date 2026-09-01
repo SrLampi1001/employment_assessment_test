@@ -5,6 +5,27 @@ description: Use this for ANY React work in TypeScript — writing, reviewing, o
 
 # React + TypeScript (current stack)
 
+> **NOT a project-specific skill (verified 2026-08-29).** This skill
+> is **generic React 19 advice** — it does NOT describe the
+> Riwi Co. frontend's conventions. The project does **not** use
+> React Router, TanStack Query, Vitest, or any of the tools this
+> skill describes. The shipped frontend is a hand-rolled
+> fetch + state + react-i18next single-page app:
+>
+> - Routing: none — three-pane layout in `frontend/src/App.tsx`
+>   with `useState`-driven channel selection.
+> - Data fetching: plain `fetch` + `useState` (see
+>   `frontend/src/copilot/CopilotPanel.tsx`, `frontend/src/messages/Conversation.tsx`).
+> - i18n: `react-i18next` 17.x with `frontend/src/i18n/{en,es}.json`.
+> - Tests: none. The project has no `*.test.ts` / `*.test.tsx`
+>   files; `package.json` has no Vitest / Testing Library.
+>
+> **Do not refactor the frontend onto the stack this skill describes
+> without an issue that names the concrete benefit.** Per
+> `/AGENTS.md`, skills should guard THIS project, not give generic
+> upgrade advice — when the project adopts any of these tools, a
+> scoped skill will replace this one.
+
 ## Why this skill exists
 
 Training data has a long tail. Class components, `PropTypes`, `react-router-dom`, and `onSuccess` callbacks on `useQuery` were all correct answers for years, so they show up constantly in generated code even now that each one has been replaced or removed. This skill exists to counteract that gravity: it captures what changed, why, and what to write instead.
