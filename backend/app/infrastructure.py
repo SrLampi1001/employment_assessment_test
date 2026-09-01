@@ -700,9 +700,19 @@ class PostgresSearchRepository:
 class PostgresRefreshTokenStore:
     """Postgres-backed refresh token store.
 
-    The `revoke_family` method is intentionally a SINGLE SQL UPDATE;
-    the test suite asserts this contract (see tests/unit/application/
-    auth/test_refresh.py::test_reuse_detection_revokes_entire_family).
+    Per ARCHITECTURE.md §3 + issue #22, the runtime role (`rw_app`,
+    no BYPASSRLS) does NOT have direct table access on
+    `rw_refresh_token` — RLS is enabled and the runtime only has
+    EXECUTE on the `rw_insert_refresh_token` /
+    `rw_find_refresh_token` / `rw_revoke_refresh_token` /
+    `rw_revoke_refresh_token_family` SECURITY DEFINER functions
+    (defined in migration 0140). Every method on this adapter is a
+    thin function call.
+
+    The `revoke_family` function is intentionally a SINGLE SQL UPDATE
+    inside the SECURITY DEFINER; the test suite asserts this
+    contract (see tests/unit/application/auth/test_refresh.py::
+    test_reuse_detection_revokes_entire_family).
     """
 
     def __init__(self, conn: Connection) -> None:
@@ -718,9 +728,7 @@ class PostgresRefreshTokenStore:
     ) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO rw_refresh_token "
-                "(rw_user_id, rw_token_hash, rw_family_id, rw_expires_at) "
-                "VALUES (%s, %s, %s, %s)",
+                "SELECT rw_insert_refresh_token(%s, %s, %s, %s)",
                 (user_id, token_hash, family_id, expires_at),
             )
 
@@ -729,7 +737,7 @@ class PostgresRefreshTokenStore:
             cur.execute(
                 "SELECT rw_id, rw_user_id, rw_token_hash, rw_family_id, "
                 "       rw_expires_at, rw_revoked_at "
-                "FROM rw_refresh_token WHERE rw_token_hash = %s",
+                "FROM rw_find_refresh_token(%s)",
                 (token_hash,),
             )
             row = cur.fetchone()
@@ -740,8 +748,7 @@ class PostgresRefreshTokenStore:
     def revoke(self, token_id: UUID) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                "UPDATE rw_refresh_token SET rw_revoked_at = now() "
-                "WHERE rw_id = %s AND rw_revoked_at IS NULL",
+                "SELECT rw_revoke_refresh_token(%s)",
                 (token_id,),
             )
 
@@ -750,11 +757,12 @@ class PostgresRefreshTokenStore:
         # Single statement, family-wide, idempotent (only revokes
         # non-revoked rows). If you find yourself "optimizing" this
         # into a Python loop, stop — the family-wide revoke is the
-        # whole point of reuse detection.
+        # whole point of reuse detection. Enforced inside the
+        # SECURITY DEFINER function so the runtime cannot accidentally
+        # bypass it.
         with self._conn.cursor() as cur:
             cur.execute(
-                "UPDATE rw_refresh_token SET rw_revoked_at = now() "
-                "WHERE rw_family_id = %s AND rw_revoked_at IS NULL",
+                "SELECT rw_revoke_refresh_token_family(%s)",
                 (family_id,),
             )
 
@@ -960,6 +968,12 @@ class PostgresCopilotUsageRepository(CopilotUsageRepository):
     invokes on every copilot call — success or failure, tokens or
     zero tokens. The §11.4 report groups by `rw_user_id` to spot
     abuse / runaway tokens.
+
+    Per ARCHITECTURE.md §3 + issue #22, the runtime role (`rw_app`,
+    no BYPASSRLS) does NOT have direct INSERT access on
+    `rw_copilot_usage` — RLS is enabled and the runtime only has
+    EXECUTE on the `rw_record_copilot_usage` SECURITY DEFINER
+    function (defined in migration 0140).
     """
 
     def __init__(self, conn: Connection) -> None:
@@ -975,9 +989,7 @@ class PostgresCopilotUsageRepository(CopilotUsageRepository):
     ) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO rw_copilot_usage "
-                "(rw_user_id, rw_model, rw_prompt_tokens, rw_completion_tokens) "
-                "VALUES (%s, %s, %s, %s)",
+                "SELECT rw_record_copilot_usage(%s, %s, %s, %s)",
                 (actor_id, model, prompt_tokens, completion_tokens),
             )
 

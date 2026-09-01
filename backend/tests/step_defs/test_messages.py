@@ -297,6 +297,32 @@ def assert_edited(ctx: dict):
     assert ctx["last_response"].json()["rw_is_edited"] is True
 
 
+@then("the original message body is unchanged")
+def assert_body_unchanged(msg_ctx: dict, super_conn):
+    with super_conn.cursor() as cur:
+        cur.execute(
+            "SELECT rw_body FROM rw_message WHERE rw_id = %s",
+            (msg_ctx["edit_message_id"],),
+        )
+        actual = cur.fetchone()[0]
+    assert actual == "alice wrote this", (
+        f"expected the original body 'alice wrote this', got {actual!r}"
+    )
+
+
+@then("the original message is not marked deleted")
+def assert_not_marked_deleted(msg_ctx: dict, super_conn):
+    with super_conn.cursor() as cur:
+        cur.execute(
+            "SELECT rw_deleted_at FROM rw_message WHERE rw_id = %s",
+            (msg_ctx["delete_message_id"],),
+        )
+        deleted_at = cur.fetchone()[0]
+    assert deleted_at is None, (
+        f"non-author DELETE must NOT touch the row; rw_deleted_at={deleted_at!r}"
+    )
+
+
 @then(
     parsers.cfparse(
         "the database has exactly one rw_message_edit row for that message"

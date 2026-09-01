@@ -12,8 +12,13 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON rw_channel_member  TO rw_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON rw_message         TO rw_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON rw_message_edit    TO rw_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON rw_message_read    TO rw_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON rw_refresh_token   TO rw_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON rw_copilot_usage   TO rw_app;
+-- rw_refresh_token and rw_copilot_usage are NOT directly granted
+-- here: migration 0140_rls_on_user_scoped_tables.sql enables RLS on
+-- them and grants EXECUTE on the rw_insert_refresh_token /
+-- rw_find_refresh_token / rw_revoke_refresh_token /
+-- rw_revoke_refresh_token_family / rw_record_copilot_usage
+-- SECURITY DEFINER functions instead. The runtime role has no direct
+-- table access — every read/write goes through those functions.
 
 GRANT SELECT ON rw_visible_message TO rw_app, PUBLIC;
 
