@@ -187,9 +187,25 @@ Transactional logic in the database:
 | `rw_register_user(...)` | Function | Validates input, hashes password (argon2id), creates `rw_user` + `rw_auth_credential` in one transaction. |
 | `rw_create_channel(...)` | Function | Creates channel + first `rw_channel_member` (the creator as `owner`) atomically. |
 | `rw_send_message(...)` | Function | Inserts message; trigger fills `rw_embedding` from `rw_body` in the same transaction. Idempotent on `rw_client_ref`. |
-| `rw_edit_message(...)` | Procedure | Required §3 procedure #1 — appends a `rw_message_edit` row, updates `rw_message.rw_body` / `rw_is_edited`, bumps `rw_edited_at`. Never physical delete. |
-| `rw_delete_message(...)` | Procedure | Required §3 procedure #2 — logical delete: sets `rw_deleted_at` + `rw_deleted_reason`. |
-| Trigger `trg_message_embedding` | Trigger | `AFTER INSERT OR UPDATE OF rw_body` on `rw_message` → recompute `rw_message.rw_embedding` from the new body. Keeps content and vector in lockstep. |
+| `rw_edit_message(...)` | Procedure | Required §3 procedure #1 — appends a `rw_message_edit` row, updates `rw_message.rw_body` / `rw_is_edited`, bumps `rw_edited_at`. Never physical delete. Re-checks the author inside the procedure body because SECURITY DEFINER bypasses RLS (see [`DECISIONS.md`](./DECISIONS.md) § "Phase 7 — `rw_edit_message` author-gate lesson"). |
+| `rw_delete_message(...)` | Procedure | Required §3 procedure #2 — logical delete: sets `rw_deleted_at` + `rw_deleted_reason`. The `AND rw_author_id = p_actor_id` clause is the author gate. |
+| `rw_add_channel_member(...)` | Function (SECURITY DEFINER) | Phase 3 — owner-only invite. RLS forbids an actor from inserting a `rw_channel_member` row for a different user, so this function runs as the migrator and re-checks the owner invariant in its body. |
+| `rw_search_messages(...)`, `rw_unread_count_for_channel(...)`, `rw_mark_channel_read(...)` | Functions (SECURITY DEFINER) | Phase 5 — lexical search + per-channel unread + bulk mark-read. All three re-check membership + GUC actor in their bodies for the same reason. |
+| `rw_insert_refresh_token / rw_find_refresh_token / rw_revoke_refresh_token / rw_revoke_refresh_token_family / rw_record_copilot_usage` | Functions (SECURITY DEFINER) | Phase 7 — every read/write against `rw_refresh_token` and `rw_copilot_usage` goes through these functions; the application role has only `EXECUTE` on them (no direct table privileges). Necessary because the login flow runs with `actor_id = None`, which would otherwise be blocked by a pure RLS policy. |
+| Trigger `trg_message_embedding` | Trigger | `AFTER INSERT OR UPDATE OF rw_body` on `rw_message` → `RAISE WARNING` if a row landed without an embedding (the seed script can't silently skip the embed step). Currently a no-op stub in production deployments — the seed script populates `rw_embedding` directly. |
+| Trigger `trg_message_read_channel` | Trigger | Phase 7 — `BEFORE INSERT` on `rw_message_read` populates `rw_channel_id` from the referenced `rw_message.rw_channel_id` so the `(rw_user_id, rw_channel_id)` index stays correct without application-side awareness. |
+
+**RLS-enabled tables (current, verified 2026-08-29):**
+
+| Table | RLS | Policy shape | How runtime accesses it |
+|---|---|---|---|
+| `rw_channel` | enabled | per-user via `rw_channel_member` | direct SQL (read/write inside `RwSession`) |
+| `rw_channel_member` | enabled | per-user `rw_user_id = GUC` | direct SQL; cross-user writes go through `rw_add_channel_member` (SECURITY DEFINER) |
+| `rw_message` | enabled | per-user via `rw_channel_member` | direct SQL reads; writes via `rw_send_message / rw_edit_message / rw_delete_message` |
+| `rw_message_edit` | enabled | per-user via join through `rw_message.rw_channel_id` → `rw_channel_member` | direct SQL read; append-only via `rw_edit_message` |
+| `rw_message_read` | enabled | per-user via join through `rw_message.rw_channel_id` → `rw_channel_member` + `rw_user_id = GUC` | direct SQL read + `INSERT ... ON CONFLICT DO NOTHING`; column `rw_channel_id` populated by `trg_message_read_channel` |
+| `rw_refresh_token` | enabled (Phase 7) | per-user `rw_user_id = GUC` | **only** via the four SECURITY DEFINER functions (`rw_insert/find/revoke/revoke_family`); runtime role has no table privileges |
+| `rw_copilot_usage` | enabled (Phase 7) | per-user `rw_user_id = GUC` | runtime role has only `SELECT` (for the §11.4 summary endpoint); writes via `rw_record_copilot_usage` (SECURITY DEFINER) |
 
 ---
 
@@ -328,19 +344,20 @@ Response shape: `{ "items": [...], "next_cursor": {"created_at": ..., "id": ...}
 
 ### Endpoint surface
 
-| Method & path | Purpose |
-|---|---|
-| `POST /api/v1/auth/register` · `POST /auth/login` · `POST /auth/refresh` | Sessions (register, JWT, refresh rotation) |
-| `GET /api/v1/me` · `PATCH /api/v1/me` | Profile / locale |
-| `GET /api/v1/channels?cursor&limit` | Visible conversations (keyset) |
-| `POST /api/v1/channels` · `POST /channels/{id}/members` | Create channel / add member |
-| `GET /api/v1/channels/{id}/messages?cursor&limit` | Channel history, keyset (§11.1) |
-| `POST /api/v1/channels/{id}/messages` | Send message (transactional function, idempotent on `rw_client_ref`) |
-| `PATCH /api/v1/messages/{id}` · `POST /messages/{id}/delete` | Edit / logical delete (procedures) |
-| `POST /api/v1/messages/{id}/read` | Mark read receipt |
-| `GET /api/v1/messages/search?q=` | Message search with `ts_headline` highlight (§11.2) |
-| `POST /api/v1/copilot/query` | RAG answer + citations (§11.3) |
-| `GET /api/v1/copilot/usage` | Accumulated consumption per user (§11.4) |
+| Method & path | Status | Purpose |
+|---|---|---|
+| `POST /api/v1/auth/register` · `POST /api/v1/auth/login` · `POST /api/v1/auth/refresh` | shipped | Sessions (register, JWT, refresh rotation) |
+| `GET /api/v1/me` | shipped | Minimal actor echo for JWT-middleware BDD tests |
+| `PATCH /api/v1/me` | **planned** (issue #26) | Profile / locale persistence — frontend already writes the chosen locale to `localStorage` and `TODO`s a server-side `PATCH /api/v1/me` call; without this endpoint the choice is lost across sessions |
+| `GET /api/v1/channels` | shipped | Visible conversations (RLS-filtered) — **no `?cursor`/`?limit` pagination yet** (issue #27); returns the full list |
+| `POST /api/v1/channels/group` · `POST /api/v1/channels/direct` · `POST /api/v1/channels/{id}/members` · `DELETE /api/v1/channels/{id}` | shipped | Create channel / add member / leave |
+| `GET /api/v1/channels/{id}/messages?cursor_ts=&cursor_id=&limit=` | shipped | Channel history, keyset (§11.1) |
+| `POST /api/v1/channels/{id}/messages` | shipped | Send message (transactional function, idempotent on `rw_client_ref`) |
+| `PATCH /api/v1/messages/{id}` · `POST /api/v1/messages/{id}/delete` | shipped | Edit / logical delete (procedures). Non-author attempts return **404** (no existence leak), not 403. |
+| `POST /api/v1/messages/{id}/read` | shipped | Mark read receipt |
+| `GET /api/v1/channels/{id}/search?q=&limit=` | shipped (channel-scoped, not cross-channel) | Message search with `ts_headline` highlight (§11.2). The original brief's `GET /api/v1/messages/search?q=` was deliberately scoped to a single channel — see [`DECISIONS.md`](./DECISIONS.md) for the rationale (avoids the cross-channel search disclosure risk). |
+| `POST /api/v1/copilot/query` | shipped | RAG answer + citations (§11.3) |
+| `GET /api/v1/copilot/usage` | shipped | Accumulated consumption per user (§11.4) |
 
 ---
 
@@ -417,8 +434,8 @@ services:
   frontend:  # static build served by nginx
 ```
 
-- `docker compose up` brings up **db + backend + frontend**.
-- One documented command applies migrations and loads the full corpus: `docker compose run migrate && docker compose run seed`.
+- `docker compose up` brings up **db + migrate + seed + backend + frontend** (5 services; `migrate` and `seed` exit after success and are gated by `completed_successfully`).
+- One documented command applies migrations and loads the full corpus: `docker compose run migrate && docker compose run seed` (both are idempotent).
 - `.env.example` ships with placeholders only — no real secrets. The project must boot on a clean machine from the README alone.
 - This local stack is unchanged in shape from the original proposal; only the Postgres image tag moves from `pg15` to `pg18` (§12).
 
@@ -449,7 +466,7 @@ The original VPS + Caddy plan assumed a small recurring spend. With a hard $0 bu
 | **Embeddings** | **Mistral `mistral-embed`** — 1024 dims (`vector(1024)`, §2.3) | **Fixed constraint.** Free "Experiment" tier on La Plateforme: no card, phone verification, ~1 req/s and a monthly token cap — for a one-shot static corpus this is trivial as long as the seed script **batches** many message bodies into one `embeddings.create(inputs=[...])` call. | `nvidia/nemotron-3-embed-1b` if the Mistral free cap is ever exceeded — config-only swap |
 | **LLM / chat** | **NVIDIA NIM**, `mistralai/mistral-nemotron` via the OpenAI-compatible endpoint `https://integrate.api.nvidia.com/v1` | **Fixed constraint.** Mistral model optimized by NVIDIA; multilingual (first-class Spanish support for ES/EN requirement + `ts_headline`); free tier (no card, ~40 req/min); citation-style answers. Replaces `meta/llama-3.3-70b-instruct` (deprecated 2026-08-25 per the [model card](https://build.nvidia.com/meta/llama-3_3-70b-instruct)). | `nvidia/nemotron-3.5-lightning-30b-a3b` if the primary is rate-limited — config-only swap, no code change |
 | Retrieval | **pgvector cosine (`<=>`) + HNSW index**, lexical fallback `ts_headline` | No extra infra; RLS applies for free | Hybrid rank fusion if quality demands |
-| Frontend | **React 19.2 + TypeScript 7.x + Vite 7.x** | React 19 is the current major (Actions, `use`, Server Components stable); Vite 7.x + TS 7.x is the combination the `react-typescript-modern` skill ships; **`typescript-eslint` peer deps currently cap at TS `<6.1.0`** ([typescript-eslint#12518](https://github.com/typescript-eslint/typescript-eslint/issues/12518)), so a project that adds ESLint must either pin TS 6.x or skip the linter until `typescript-eslint` catches up — flag this in the CI workflow decision. Build tooling floor: Node 22.22+ (required by React Router v8, which the React skill pins); use **Node 24 (current Active LTS)** for the build stage. `react-infinite-scroll-component` (IntersectionObserver, ~4 kB gzipped, React 19 compatible) handles the lazy keyset history. | Angular if more familiar |
+| Frontend | **React 19.2 + TypeScript 7.x + Vite 7.x** | React 19 is the current major (Actions, `use`, Server Components stable); Vite 7.x + TS 7.x is the combination the `react-typescript-modern` skill ships; **`typescript-eslint` peer deps currently cap at TS `<6.1.0`** ([typescript-eslint#12518](https://github.com/typescript-eslint/typescript-eslint/issues/12518)), so a project that adds ESLint must either pin TS 6.x or skip the linter until `typescript-eslint` catches up — flag this in the CI workflow decision. Build tooling floor: Node 22.22+ (current Active LTS as of 2026-08). The shipped frontend is a hand-rolled fetch + state + `react-i18next` single-page app (three-pane layout in `frontend/src/App.tsx`; see `.agents/skills/react-typescript-modern` for the banner explaining why the React skill is generic, not project-specific). `react-infinite-scroll-component` (IntersectionObserver, ~4 kB gzipped, React 19 compatible) handles the lazy keyset history. | Angular if more familiar |
 | i18n | **react-i18next 17.x** (i18next 26.x) with `es.json` / `en.json` files | Requirement: zero hardcoded strings; the locale lives on `rw_user.rw_locale` | FormatJS |
 | Testing | **pytest 9.x + pytest-bdd + testcontainers-python 4.x** | Two BDD scenarios against a real PostgreSQL (the brief's mandate); pin the `pgvector/pgvector:pg18` image in the testcontainers fixture so tests exercise the real extension version used in prod | vitest + supertest (if TS) |
 | Containerization | **Docker Compose** (5 services, §11) | Brief requirement; base images bumped to `python:3.13-slim` and `node:24-alpine` | — |
