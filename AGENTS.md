@@ -2,6 +2,12 @@
 
 This document outlines norms for AI/LLM agents (or human contributors) working on the **Riwi Co. Messaging Platform** project.
 
+## Writing policy
+- Line breaks only separate ideas. **DO NOT** use them to adjust paragraph width.
+  Applies to commits, PRs, issues, Markdown docs, and code comments.
+- **Concise** — fewer words is better. Verbosity is noise.
+- **Local and remote stay separated** — never mention in-session context in commits, PRs, issues, or reviews; the remote doesn't care about your local session.
+
 ---
 
 ## Branching & Version Control
@@ -156,8 +162,19 @@ Skills under `.agents/skills/` are **AI-agent guardrails**, not the project's so
 | Code in a skill | Treatment |
 |---|---|
 | Descriptive patterns (`function send_message(...)`, generic idiomatic snippets, layer-diagram code) | **Keep.** These teach the AI the *shape* of correct code. They may go slightly stale on syntax details; that's acceptable. |
-| Feature-specific code that mirrors shipped functionality (`@router.post("/channels/{id}/messages")` if `/backend/app/delivery/http/messages.py` already has the real handler) | **Replace with a reference** to the actual file and a one-line summary of what it does. The skill should not contain a second copy of the truth. |
+| Feature-specific code that mirrors shipped functionality (e.g. `build_messages_router` if `/backend/app/delivery.py` already has the real handler) | **Replace with a reference** to the actual file and a one-line summary of what it does. The skill should not contain a second copy of the truth. |
 | Version snapshots (table rows that pin versions) | **Keep**, but mark the date and verify against the project's `pyproject.toml` / `package.json` in PR review. If a pin drifts, open a follow-up. |
+
+### What lives in skills
+Skills provide the AI agents with the context required to follow a given stack — conventions and instructions that differ from the agent's default behavior. Only that context should live in a skill:
+- **Deprecated reference list** — fixes deprecated functions AI agents reach for by default, with current replacements.
+- **Reference links** — official docs, so agents don't drift on web search.
+- **Architecture references** — file layout, folder structure, modularization, encapsulation, and common practices, as an insurance policy for code standardization.
+
+### What shouldn't live in a skill
+- **Decision Records** — no "why we picked X" or "PR #N changed this" rationale. State the current rule plainly; rationale lives in `/docs/DECISIONS.md` and `/docs/ARCHITECTURE.md`.
+- **Ghost references** — paths to files that don't exist. Skills must be truthful to the codebase, never ahead of it.
+- **Roadmap / follow-up state** — `issue #N`, `not yet implemented`, `tracked under #N` belong in issues/ARCHITECTURE.md, not the skill.
 
 ### When code ships
 

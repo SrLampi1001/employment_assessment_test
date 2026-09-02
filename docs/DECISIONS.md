@@ -712,3 +712,69 @@ docs/DECISIONS.md                         # this entry
 ```
 
 
+---
+
+## Phase 7 â€” Security sweep + skill/doc maintenance (AI-assistant)
+
+Captured during the audit that produced the 11 issues (#21â€“#31, closed in PRs #32 and #33) and the skill/doc maintenance PR. Three lessons that are easy to lose track of if they are not recorded explicitly.
+
+### Lesson 1 â€” `rw_edit_message` author-gate inside the procedure body
+
+**The hole that was there before PR #33.** `rw_edit_message(...)` is a `SECURITY DEFINER` procedure. The function owner in development is `postgres` (`rolsuper = t`), and in production is `rw_migrator` (a plain LOGIN role â€” no `BYPASSRLS`, no `SUPERUSER`). Either way, *if the function owner is also `SUPERUSER`*, RLS does not fire inside the procedure body. The `rw_message_update` RLS policy has `USING (rw_author_id = current_setting('app.current_user_id', true)::uuid)`, but that policy never even runs inside a SECURITY DEFINER function whose owner is `SUPERUSER`.
+
+Consequence before the fix: a non-author (Bob) could call `CALL rw_edit_message(alice_message_id, bob_id, 'hijacked')`. The procedure's only actor check was `p_editor_id IS DISTINCT FROM current_setting('app.current_user_id', true)::uuid`, which *passes* (Bob's GUC matches Bob's call). The procedure then `UPDATE rw_message SET rw_body = 'hijacked' WHERE rw_id = ...` â€” the RLS USING clause never fires â€” and Alice's message body is overwritten. The route returned 200 (happy path) because the `SELECT 1 FROM rw_message WHERE rw_id = ... AND rw_is_edited = true` check succeeded (Bob's actor is set; RLS permits him to see his own updates to the row, *but the row update itself was never gated*).
+
+**The fix** (PR #33, migration 0040 `rw_edit_message` body): explicit `SELECT rw_author_id INTO v_author_id FROM rw_message WHERE rw_id = ...` at the top, then `IF v_author_id IS NULL OR v_author_id <> p_editor_id THEN RETURN`. The application layer's `repo.edit` then sees zero affected rows â†’ 404 to the route.
+
+`rw_delete_message` already had `AND rw_author_id = p_actor_id` in its UPDATE clause, so it was safe. The bug was unique to `rw_edit_message`.
+
+**Why this matters going forward.** Any future SECURITY DEFINER procedure that does a write which RLS would otherwise gate needs an explicit check in the body. The pattern from `rw_add_channel_member` (Phase 3, migration 0100) is the model â€” re-check GUC actor + membership inside the body, even when RLS would fire on a non-SECURITY-DEFINER call.
+
+### Lesson 2 â€” `rw_refresh_token` and `rw_copilot_usage` need SECURITY DEFINER wrappers, not just RLS
+
+`rw_refresh_token` is read during the Login flow **before** the actor has a JWT. `RwSession` is opened with `actor_id = None`, so there is no `app.current_user_id` GUC for RLS to read. A pure RLS policy keyed on `rw_user_id = GUC` would block the entire auth path â€” including Login, Refresh, and the reuse-detection revoke.
+
+The same problem applies to `rw_copilot_usage` writes during a *normal* authenticated request â€” except here the GUC *is* set, so a pure RLS policy would work for INSERT. We still chose the SECURITY DEFINER wrapper pattern for consistency and defense in depth.
+
+The fix (PR #33, migration 0140): five SECURITY DEFINER functions covering every read/write the runtime currently does:
+
+- `rw_insert_refresh_token(p_user_id, p_token_hash, p_family_id, p_expires_at)` â€” for `PostgresRefreshTokenStore.insert` (Login + Refresh)
+- `rw_find_refresh_token(p_token_hash)` â€” for `PostgresRefreshTokenStore.find_by_hash` (Refresh)
+- `rw_revoke_refresh_token(p_token_id)` â€” for `PostgresRefreshTokenStore.revoke` (Refresh happy path)
+- `rw_revoke_refresh_token_family(p_family_id)` â€” for `PostgresRefreshTokenStore.revoke_family` (Refresh reuse detection)
+- `rw_record_copilot_usage(p_user_id, p_model, p_prompt_tokens, p_completion_tokens)` â€” for `PostgresCopilotUsageRepository.record`
+
+The runtime role (`rw_app_login`, inheriting `rw_app`) has **only EXECUTE** on these functions; table privileges on `rw_refresh_token` are `REVOKE ALL`. `rw_copilot_usage` keeps `GRANT SELECT` so the Â§11.4 summary endpoint can aggregate from RLS-filtered rows; writes go through `rw_record_copilot_usage`.
+
+**Why this matters going forward.** Any future per-user table that the runtime needs to read or write must follow this pattern: enable RLS + write SECURITY DEFINER wrappers + grant only EXECUTE on the wrappers (or the narrowest table grant possible). The Â§11.4 `SELECT` on `rw_copilot_usage` is the only case where direct table access survives â€” and only because the actor can only see their own rows anyway.
+
+### Lesson 3 â€” 404, not 403, for "not your message"
+
+ARCH Â§6 specifies that missing-or-invisible resources return **404, never 403** â€” `403` leaks that a row exists, which is itself confidential. The Phase 1 PATCH/DELETE routes in `delivery.py` already mapped a zero-affected-rows procedure call to 404 (because `repo.edit` / `repo.logical_delete` return `False`). The dead `'not-author': 403` entry in `_STATUS_MAP` was removed in PR #33 â€” nothing in the codebase raises that code.
+
+The BDD coverage for this contract (PR #33) is two scenarios in `messages.feature`:
+
+- `Non-author gets 404 from PATCH /messages/{id} (not 403)` â€” Alice creates a channel + sends a message; Bob logs in; Bob's PATCH returns 404 AND the underlying `rw_body` is unchanged (verified directly via `super_conn`).
+- `Non-author gets 404 from POST /messages/{id}/delete (not 403)` â€” same shape for delete; asserts `rw_deleted_at` is still NULL.
+
+**Why this matters going forward.** Every endpoint that resolves an actor-scoped resource must fail closed â€” 404 if the row is missing OR if the actor isn't authorized to see it. Returning 403 anywhere is a leakage bug. If a future feature needs a separate "you can't do this even though you can see it" code (e.g. owner-only mutations on a channel), 403 is fine *only when the actor's visibility of the resource is already established*.
+
+### Skill + doc maintenance â€” what changed and why
+
+The audit also surfaced significant drift in the `.agents/skills/` directory (the AI-agent guardrails). Per `/AGENTS.md` Skill Maintenance, predictive code blocks in skills were stripped to one-line references to the shipped files. The four project-relevant skills (ai-provider-integration, postgresql-rls-pgvector, fastapi-development, pytest-bdd-testcontainers) collapsed by roughly half on average and now lead with a "verified <date>" banner so future agents can spot drift at a glance.
+
+The fifth skill (`react-typescript-modern`) was kept but given a clear banner marking it as **not project-specific** â€” the project does not use React Router, TanStack Query, Vitest, or any of the tools that skill describes. Per the user's decision, the skill remains as generic React 19 reference material rather than being deleted; future agents see the banner and don't refactor the frontend onto an un-adopted stack.
+
+ARCHITECTURE.md was updated to reflect the current RLS-enabled table set (7 tables after migration 0140), the endpoint table (status column distinguishes shipped from planned), and the docker-compose service count (5 services including `migrate` and `seed`, not 3).
+
+### File map (changes in this maintenance pass)
+
+```
+.agents/skills/ai-provider-integration/SKILL.md           # 431 -> 200 lines; predictive code stripped
+.agents/skills/postgresql-rls-pgvector/SKILL.md           # real layout (no db/seed/, no 0010_rls_roles.sql)
+.agents/skills/fastapi-development/SKILL.md               # real flat layout (no predictive nested, no DI container claim)
+.agents/skills/pytest-bdd-testcontainers/SKILL.md         # file names + role naming corrected
+.agents/skills/react-typescript-modern/SKILL.md           # banner: not project-specific
+docs/ARCHITECTURE.md                                      # Â§3 RLS table; Â§6 endpoint status; Â§11 service count; Â§12 React skill note
+docs/DECISIONS.md                                         # this entry
+```
