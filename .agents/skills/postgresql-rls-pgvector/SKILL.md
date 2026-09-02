@@ -5,15 +5,9 @@ description: Design, write, review, and debug the PostgreSQL 18 schema, Row-Leve
 
 # PostgreSQL + RLS + pgvector — Riwi Co. Messaging Platform
 
-> **Skill maintenance notice (verified 2026-08-29).** Per
-> [`/AGENTS.md`](../AGENTS.md) "Skill Maintenance": this skill no
-> longer carries predictive code blocks — every code path below
-> references the shipped migration file directly. If this file
-> contradicts `/db/migrations/*.sql`, the migrations win.
-
 ## Ground rule: the database is the security boundary
 
-Per [`/docs/ARCHITECTURE.md §3`](../docs/ARCHITECTURE.md), the visibility rule is enforced **in PostgreSQL**, not in the application. The backend, the seed script, and even a DBA with `psql` obey the same RLS policies. There is exactly one place to audit.
+Per [`/docs/ARCHITECTURE.md §3`](../../../docs/ARCHITECTURE.md), the visibility rule is enforced **in PostgreSQL**, not in the application. The backend, the seed script, and even a DBA with `psql` obey the same RLS policies. There is exactly one place to audit.
 
 Consequences for every query you write:
 
@@ -87,15 +81,10 @@ backend/tests/step_defs/            — One .py per .feature (test_*.py)
 
 Migrations are **forward-only**. Each file is idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP IF EXISTS`). The `migrate` compose service runs them once at stack boot in lexicographic order.
 
-> **What does NOT exist** (do not invent references to these files):
-> `0010_rls_roles.sql` — roles live in `0002_roles.sql`.
-> `db/seed/seed.json`, `db/seed/stg_seed_message.sql`, `db/seed/silver_to_gold.sql` — the seed is `backend/scripts/seed.py` (loads `seed.json` via `psycopg` directly, not a separate `seed.json` SQL file in `db/`).
-> `db/tests/` — BDD tests live under `backend/tests/`.
-
 ## Step 3: Tables + indexes — see shipped files
 
-- [`/db/migrations/0020_tables.sql`](../../db/migrations/0020_tables.sql) — one-line summary: 9 `rw_*` tables in 3FN dependency order; every table `CREATE TABLE IF NOT EXISTS`; the `rw_message_deletion_consistency` CHECK invariant on logical deletion (both columns null or both set).
-- [`/db/migrations/0030_indexes.sql`](../../db/migrations/0030_indexes.sql) — one-line summary: the two REQUIRED partial unique indexes (`uq_rw_channel_member_active`, `uq_rw_message_client_ref`), the keyset pagination backing index `(rw_channel_id, rw_created_at DESC, rw_id DESC)`, the HNSW `vector_cosine_ops` index, per-locale GIN FTS indexes, and the `ix_rw_message_read_user_channel` index (per ARCH §2.4, `(rw_user_id, rw_channel_id)` — the column was added by migration 0130).
+- [`/db/migrations/0020_tables.sql`](../../../db/migrations/0020_tables.sql) — one-line summary: 9 `rw_*` tables in 3FN dependency order; every table `CREATE TABLE IF NOT EXISTS`; the `rw_message_deletion_consistency` CHECK invariant on logical deletion (both columns null or both set).
+- [`/db/migrations/0030_indexes.sql`](../../../db/migrations/0030_indexes.sql) — one-line summary: the two REQUIRED partial unique indexes (`uq_rw_channel_member_active`, `uq_rw_message_client_ref`), the keyset pagination backing index `(rw_channel_id, rw_created_at DESC, rw_id DESC)`, the HNSW `vector_cosine_ops` index, per-locale GIN FTS indexes, and the `ix_rw_message_read_user_channel` index (per ARCH §2.4, `(rw_user_id, rw_channel_id)` — the column was added by migration 0130).
 
 The names follow ARCH §2.3 exactly (`snake_case`, `rw_` prefix, `uuid` PKs, `timestamptz` UTC with `DEFAULT now()`). Re-run safely — `IF NOT EXISTS` makes the migrations idempotent.
 
@@ -103,14 +92,14 @@ The names follow ARCH §2.3 exactly (`snake_case`, `rw_` prefix, `uuid` PKs, `ti
 
 RLS pattern from ARCH §3. The actor is set transaction-local; the policy joins to `rw_channel_member` to verify membership.
 
-**See the shipped file:** [`/db/migrations/0060_rls_policies.sql`](../../db/migrations/0060_rls_policies.sql) — one-line summary: RLS is enabled on `rw_channel / rw_channel_member / rw_message / rw_message_edit / rw_message_read`; per-user policies split SELECT / INSERT / UPDATE / ALL; every policy reads the actor from `current_setting('app.current_user_id', true)::uuid` and joins to `rw_channel_member` to verify the actor is a current member of the channel. Idempotent — each policy is `DROP POLICY IF EXISTS` then `CREATE POLICY`.
+**See the shipped file:** [`/db/migrations/0060_rls_policies.sql`](../../../db/migrations/0060_rls_policies.sql) — one-line summary: RLS is enabled on `rw_channel / rw_channel_member / rw_message / rw_message_edit / rw_message_read`; per-user policies split SELECT / INSERT / UPDATE / ALL; every policy reads the actor from `current_setting('app.current_user_id', true)::uuid` and joins to `rw_channel_member` to verify the actor is a current member of the channel. Idempotent — each policy is `DROP POLICY IF EXISTS` then `CREATE POLICY`.
 
-For `rw_refresh_token` and `rw_copilot_usage`, see [`/db/migrations/0140_rls_on_user_scoped_tables.sql`](../../db/migrations/0140_rls_on_user_scoped_tables.sql) — same `rw_user_id = GUC` policy pattern, but the runtime role has **only EXECUTE on the SECURITY DEFINER functions** (`rw_insert_refresh_token` / `rw_find_refresh_token` / `rw_revoke_refresh_token` / `rw_revoke_refresh_token_family` / `rw_record_copilot_usage`). The rationale for the SECURITY DEFINER wrapper is documented in `DECISIONS.md`.
+For `rw_refresh_token` and `rw_copilot_usage`, see [`/db/migrations/0140_rls_on_user_scoped_tables.sql`](../../../db/migrations/0140_rls_on_user_scoped_tables.sql) — same `rw_user_id = GUC` policy pattern, but the runtime role has **only EXECUTE on the SECURITY DEFINER functions** (`rw_insert_refresh_token` / `rw_find_refresh_token` / `rw_revoke_refresh_token` / `rw_revoke_refresh_token_family` / `rw_record_copilot_usage`).
 
 **Two important details:**
 
 1. **`current_setting('app.current_user_id', true)` — note the `true` second argument.** It returns `NULL` (instead of erroring) when the GUC is unset. Cast `::uuid` then fails closed (returns zero rows) instead of failing open. This is the difference between a security model and a security incident. *Known edge case:* an explicitly set empty string (e.g. `set_config(..., NULL, false)` from a test) errors on the `::uuid` cast — still fail-closed (no leak) but ugly. Wrap in `NULLIF(setting, '')` if a cleaner error is needed.
-2. **Privileges for the app role.** [`/db/migrations/0080_grants.sql`](../../db/migrations/0080_grants.sql) issues `GRANT SELECT, INSERT, UPDATE, DELETE ON rw_* TO rw_app` + `GRANT EXECUTE ON FUNCTION/PROCEDURE ...`. RLS is the *row-level* filter; standard `GRANT` is still needed at the table level for the tables the runtime can touch directly (every `rw_*` except `rw_refresh_token`, where the runtime has only the SECURITY DEFINER functions; `rw_copilot_usage` retains `SELECT` for the §11.4 summary endpoint). The default-deny policy applies if RLS is enabled with no matching `FOR SELECT` policy.
+2. **Privileges for the app role.** [`/db/migrations/0080_grants.sql`](../../../db/migrations/0080_grants.sql) issues `GRANT SELECT, INSERT, UPDATE, DELETE ON rw_* TO rw_app` + `GRANT EXECUTE ON FUNCTION/PROCEDURE ...`. RLS is the *row-level* filter; standard `GRANT` is still needed at the table level for the tables the runtime can touch directly (every `rw_*` except `rw_refresh_token`, where the runtime has only the SECURITY DEFINER functions; `rw_copilot_usage` retains `SELECT` for the §11.4 summary endpoint). The default-deny policy applies if RLS is enabled with no matching `FOR SELECT` policy.
 
 ### 4.5: Channel-scoped RLS — the Phase 3 pattern
 
@@ -120,7 +109,7 @@ The `rw_channel_member` policy is intentionally narrow — the actor can only se
 - `UPDATE` their own `rw_left_at` for the leave flow.
 - `INSERT` a membership row for themselves (re-join after leaving).
 
-But it **forbids** adding a *different* user as a member, so the "channel owner invites someone else" flow needs a SECURITY DEFINER function. See [`/db/migrations/0100_rw_add_channel_member.sql`](../../db/migrations/0100_rw_add_channel_member.sql) for the shipped pattern. The function body enforces:
+But it **forbids** adding a *different* user as a member, so the "channel owner invites someone else" flow needs a SECURITY DEFINER function. See [`/db/migrations/0100_rw_add_channel_member.sql`](../../../db/migrations/0100_rw_add_channel_member.sql) for the shipped pattern. The function body enforces:
 
 1. The GUC actor matches the inviter (`rw_add_channel_member: inviter mismatch with actor GUC`).
 2. The inviter is the channel creator (`rw_created_by = p_inviter_id`).
@@ -133,23 +122,23 @@ But it **forbids** adding a *different* user as a member, so the "channel owner 
 
 The write path goes through DB functions/procedures, not raw application SQL (ARCH §3 + §5.1).
 
-**See the shipped file:** [`/db/migrations/0040_functions_procedures.sql`](../../db/migrations/0040_functions_procedures.sql) — one-line summary: 3 functions (`rw_register_user`, `rw_create_channel`, `rw_send_message`) and the 2 REQUIRED procedures (`rw_edit_message`, `rw_delete_message`), all `LANGUAGE plpgsql SECURITY DEFINER`. Each function checks `p_actor_id = current_setting('app.current_user_id', true)::uuid` and re-verifies membership explicitly (defense in depth: the function is `SECURITY DEFINER`, so RLS does *not* block the write — the body has to).
+**See the shipped file:** [`/db/migrations/0040_functions_procedures.sql`](../../../db/migrations/0040_functions_procedures.sql) — one-line summary: 3 functions (`rw_register_user`, `rw_create_channel`, `rw_send_message`) and the 2 REQUIRED procedures (`rw_edit_message`, `rw_delete_message`), all `LANGUAGE plpgsql SECURITY DEFINER`. Each function checks `p_actor_id = current_setting('app.current_user_id', true)::uuid` and re-verifies membership explicitly (defense in depth: the function is `SECURITY DEFINER`, so RLS does *not* block the write — the body has to).
 
-> **Critical lesson (DECISIONS.md):** `rw_edit_message` runs as the function owner (`postgres` in dev, `rw_migrator` in prod). The function owner has `BYPASSRLS` *if it is also `SUPERUSER`*. In this project `rw_migrator` is a plain LOGIN role (no `BYPASSRLS`), so RLS *does* fire inside the procedure body — BUT the `rw_message_update` policy's `USING (rw_author_id = GUC)` clause isn't sufficient on its own when the body does multiple statements. The procedure must re-enforce the author gate explicitly. Migration 0040's `rw_edit_message` body does this; do not remove it when refactoring.
+> `rw_edit_message` runs as the function owner (`postgres` in dev, `rw_migrator` in prod). The function owner has `BYPASSRLS` *if it is also `SUPERUSER`*. In this project `rw_migrator` is a plain LOGIN role (no `BYPASSRLS`), so RLS *does* fire inside the procedure body — BUT the `rw_message_update` policy's `USING (rw_author_id = GUC)` clause isn't sufficient on its own when the body does multiple statements. The procedure must re-enforce the author gate explicitly. Migration 0040's `rw_edit_message` body does this; do not remove it when refactoring.
 
-The full list of SECURITY DEFINER wrappers lives in [`/db/migrations/0100` `0110` `0120` `0140`](../../db/migrations/). The pattern is always: function owner is `rw_migrator`; body checks GUC actor + membership explicitly because RLS is bypassed from inside.
+The full list of SECURITY DEFINER wrappers lives in [`/db/migrations/0100` `0110` `0120` `0140`](../../../db/migrations/). The pattern is always: function owner is `rw_migrator`; body checks GUC actor + membership explicitly because RLS is bypassed from inside.
 
 ## Step 6: Triggers — keeping `rw_embedding` in lockstep
 
-**See the shipped file:** [`/db/migrations/0050_triggers.sql`](../../db/migrations/0050_triggers.sql) — one-line summary: `rw_compute_message_embedding()` AFTER INSERT OR UPDATE OF `rw_body` on `rw_message`; `RAISE WARNING` if a row landed without an embedding (the seed script can't silently skip the embed step). Idempotent — `DROP TRIGGER IF EXISTS` then `CREATE TRIGGER`.
+**See the shipped file:** [`/db/migrations/0050_triggers.sql`](../../../db/migrations/0050_triggers.sql) — one-line summary: `rw_compute_message_embedding()` AFTER INSERT OR UPDATE OF `rw_body` on `rw_message`; `RAISE WARNING` if a row landed without an embedding (the seed script can't silently skip the embed step). Idempotent — `DROP TRIGGER IF EXISTS` then `CREATE TRIGGER`.
 
 The project chose to compute embeddings in the application (`infrastructure/ai/MistralAdapter`) and pass them in via the `rw_send_message` parameter list. The trigger exists as a guardrail — `RAISE WARNING` if a row landed without one, so the seed script can't silently skip the embed step.
 
-> **Known follow-up (issue #24, not yet shipped):** the trigger is currently a no-op stub in production deployments — it `RAISE WARNING`s but does not actually call Mistral from inside the database (no HTTP from PG). The seed script is the only place embeddings are populated today. Filing a follow-up that re-introduces the application-side `rw_message.embedding` population in the seed is the cleanest path forward; avoid trying to call Mistral from inside the trigger body.
+> The trigger is currently a no-op stub in production deployments — it `RAISE WARNING`s but does not actually call Mistral from inside the database (no HTTP from PG). The seed script is the only place embeddings are populated today. Do not add an HTTP call to Mistral inside the trigger body; populate `rw_message.embedding` in the seed path instead.
 
 ## Step 7: Views
 
-**See the shipped file:** [`/db/migrations/0070_views.sql`](../../db/migrations/0070_views.sql) — one-line summary: one view, `rw_visible_message`, declared **WITH (security_invoker = true)** so RLS on `rw_message` applies through it (PG 15+ changed the default to `security_invoker = false`, which would let the view run as the migrator / superuser and silently re-introduce the leak the policies are here to close). Filter is `rw_deleted_at IS NULL`.
+**See the shipped file:** [`/db/migrations/0070_views.sql`](../../../db/migrations/0070_views.sql) — one-line summary: one view, `rw_visible_message`, declared **WITH (security_invoker = true)** so RLS on `rw_message` applies through it (PG 15+ changed the default to `security_invoker = false`, which would let the view run as the migrator / superuser and silently re-introduce the leak the policies are here to close). Filter is `rw_deleted_at IS NULL`.
 
 RLS still applies on top of the view (Postgres honours RLS on the underlying table). This view just collapses the "is it logically deleted?" check so query authors don't have to remember.
 
@@ -216,13 +205,13 @@ ON CONFLICT (rw_author_id, rw_client_ref)
 RETURNING * INTO v_msg;
 ```
 
-See [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../db/migrations/0110_rw_send_message_replay_flag.sql).
+See [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../../db/migrations/0110_rw_send_message_replay_flag.sql).
 
 ## Step 9.7: ts_headline + per-channel unread + bulk mark-read
 
 Three SECURITY DEFINER functions added in Phase 5 (`db/migrations/0120_rw_search_messages.sql`):
 
-- `rw_search_messages(p_channel_id, p_query, p_limit, p_actor_id)` → `TABLE` with `ts_headline` highlight (`<mark>…</mark>` around matches). Locale is pulled from `rw_user.rw_locale` (NOT from a parameter the client can lie about, NOT hardcoded). See [`db/migrations/0120_rw_search_messages.sql`](../../db/migrations/0120_rw_search_messages.sql) — one-line summary: 3 SECURITY DEFINER functions, all with GUC-actor + channel-membership defense-in-depth checks because SECURITY DEFINER bypasses RLS.
+- `rw_search_messages(p_channel_id, p_query, p_limit, p_actor_id)` → `TABLE` with `ts_headline` highlight (`<mark>…</mark>` around matches). Locale is pulled from `rw_user.rw_locale` (NOT from a parameter the client can lie about, NOT hardcoded). See [`db/migrations/0120_rw_search_messages.sql`](../../../db/migrations/0120_rw_search_messages.sql) — one-line summary: 3 SECURITY DEFINER functions, all with GUC-actor + channel-membership defense-in-depth checks because SECURITY DEFINER bypasses RLS.
 - `rw_unread_count_for_channel(p_channel_id, p_user_id)` → `integer` — counts visible messages NOT in `rw_message_read` for that user. Returns `0` for non-members (defense in depth, since SECURITY DEFINER bypasses RLS).
 - `rw_mark_channel_read(p_channel_id, p_user_id)` → `integer` — single `INSERT … SELECT … WHERE NOT EXISTS … ON CONFLICT DO NOTHING RETURNING` statement. Idempotent (the UNIQUE constraint on `(rw_message_id, rw_user_id)` swallows duplicates). Returns the count of newly-inserted rows.
 
@@ -232,21 +221,21 @@ Three SECURITY DEFINER functions added in Phase 5 (`db/migrations/0120_rw_search
 2. **SECURITY DEFINER bypasses RLS — explicit membership check is mandatory.** Without `IF NOT EXISTS (SELECT 1 FROM rw_channel_member WHERE ...)` at the top of each function, a non-member could call `rw_search_messages(their_channel_id=...with_other_users_only)` and bypass RLS entirely. The GUC actor check (`p_actor_id = current_setting('app.current_user_id', true)::uuid`) is also required.
 3. **The migration is `DROP FUNCTION IF EXISTS` + `CREATE FUNCTION` (NOT `CREATE OR REPLACE FUNCTION`).** Because the function signatures changed (e.g. Phase 4 added the `out_was_replay` OUT parameter), `CREATE OR REPLACE` refuses if the OUT parameter list differs. `DROP` then `CREATE` is the only safe path. Same pattern applies if a future phase adds new functions.
 
-See the `Search messages + per-channel unread + bulk mark-read` use case in [`/backend/app/messages.py`](../../backend/app/messages.py) — one-line summary: `SearchMessages` validates input (query 1..200, limit 1..50) and projects hits with the actor's `is_mine` flag; `MarkChannelRead` is a thin dispatcher around `repo.mark_channel_read`.
+See the `Search messages + per-channel unread + bulk mark-read` use case in [`/backend/app/messages.py`](../../../backend/app/messages.py) — one-line summary: `SearchMessages` validates input (query 1..200, limit 1..50) and projects hits with the actor's `is_mine` flag; `MarkChannelRead` is a thin dispatcher around `repo.mark_channel_read`.
 
 ## Step 10: Seed / Bronze–Silver (ARCHITECTURE §9)
 
 Even for a one-shot load, Bronze keeps the seed as received (auditable, immutable). Silver is the 3FN model.
 
-**See the shipped file:** [`/backend/scripts/seed.py`](../../backend/scripts/seed.py) — one-line summary: Bronze loads `seed.json` into `stg_seed_message (rw_payload jsonb)` (migration 0090); Silver does the 1FN→3FN load into `rw_user / rw_channel / rw_channel_member / rw_message` with parameterized inserts. Embeddings are computed in Python (`infrastructure/ai/MistralAdapter`) and inserted in batches of up to 512 texts per `embeddings.create(...)` call — the Mistral free tier's batch limit.
+**See the shipped file:** [`/backend/scripts/seed.py`](../../../backend/scripts/seed.py) — one-line summary: Bronze loads `seed.json` into `stg_seed_message (rw_payload jsonb)` (migration 0090); Silver does the 1FN→3FN load into `rw_user / rw_channel / rw_channel_member / rw_message` with parameterized inserts. Embeddings are computed in Python (`infrastructure/ai/MistralAdapter`) and inserted in batches of up to 512 texts per `embeddings.create(...)` call — the Mistral free tier's batch limit.
 
 ## Step 11: Testing — BDD against real PostgreSQL
 
 Use **`testcontainers-python`** so tests exercise the *real* `pgvector` extension and the *real* RLS policy. Mocking RLS defeats the point.
 
-**See the shipped fixture:** [`/backend/tests/conftest.py`](../../backend/tests/conftest.py) — one-line summary: `pg_container` (session-scoped `PostgresContainer("pgvector/pgvector:pg18")`), `_bootstrap` (applies migrations + creates `rw_app_login` with the test password, *skipping* `0002_roles.sql` so the testcontainer's role names don't collide), `pg_super_url` / `pg_app_url` (the two URLs the rest of the suite uses), `super_conn` (superuser — setup only) and `actor_conn` (`rw_app_login` — every read-and-assert goes here). Per-scenario TRUNCATE (autouse `_seed`) keeps tests independent; the canonical Valentina / Camila UUIDs are exported from `conftest` so step defs and the feature file stay in sync.
+**See the shipped fixture:** [`/backend/tests/conftest.py`](../../../backend/tests/conftest.py) — one-line summary: `pg_container` (session-scoped `PostgresContainer("pgvector/pgvector:pg18")`), `_bootstrap` (applies migrations + creates `rw_app_login` with the test password, *skipping* `0002_roles.sql` so the testcontainer's role names don't collide), `pg_super_url` / `pg_app_url` (the two URLs the rest of the suite uses), `super_conn` (superuser — setup only) and `actor_conn` (`rw_app_login` — every read-and-assert goes here). Per-scenario TRUNCATE (autouse `_seed`) keeps tests independent; the canonical Valentina / Camila UUIDs are exported from `conftest` so step defs and the feature file stay in sync.
 
-The two mandatory BDD scenarios from `ARCHITECTURE §10` live in [`/backend/tests/features/membership.feature`](../../backend/tests/features/membership.feature). They MUST pass against the real `pgvector/pgvector:pg18` image and the real `rw_app_login` role (no `BYPASSRLS`).
+The two mandatory BDD scenarios from `ARCHITECTURE §10` live in [`/backend/tests/features/membership.feature`](../../../backend/tests/features/membership.feature). They MUST pass against the real `pgvector/pgvector:pg18` image and the real `rw_app_login` role (no `BYPASSRLS`).
 
 ## Step 12: Project-banned SQL patterns
 

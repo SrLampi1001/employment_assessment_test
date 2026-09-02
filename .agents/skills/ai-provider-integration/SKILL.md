@@ -5,17 +5,11 @@ description: Implement, review, and debug the AI copilot for the Riwi Co. Messag
 
 # AI Provider Integration — Riwi Co. Messaging Platform
 
-> **Skill maintenance notice (verified 2026-08-29).** Per
-> [`/AGENTS.md`](../AGENTS.md) "Skill Maintenance": this skill no
-> longer carries predictive code blocks — every code path below lives
-> in shipped source. The single source of truth is the actual file;
-> this skill is the **decision log** + **banned-pattern checklist** +
-> **denial taxonomy**, not a copy of the implementation. If this file
-> contradicts `/backend/app/copilot.py`, the file wins.
+> this skill is the **decision log** + **banned-pattern checklist** + **denial taxonomy**, not a copy of the implementation. If this file contradicts `/backend/app/copilot.py`, the file wins.
 
 ## Ground rule: the copilot is permission-filtered by RLS, not by the LLM
 
-Per [`/docs/ARCHITECTURE.md §4`](../docs/ARCHITECTURE.md), the copilot's context window is filled with rows from `rw_visible_message` *after* the same RLS policy as the rest of the system has filtered them. **There is no separate "AI permission layer"** — the same `app.current_user_id` GUC that protects `/api/v1/messages/search` protects `/api/v1/copilot/query`. The LLM never sees rows the actor couldn't see via direct API.
+Per [`/docs/ARCHITECTURE.md §4`](../../../docs/ARCHITECTURE.md), the copilot's context window is filled with rows from `rw_visible_message` *after* the same RLS policy as the rest of the system has filtered them. **There is no separate "AI permission layer"** — the same `app.current_user_id` GUC that protects `/api/v1/messages/search` protects `/api/v1/copilot/query`. The LLM never sees rows the actor couldn't see via direct API.
 
 Consequences:
 
@@ -46,12 +40,12 @@ Consequences:
 | Model name source | `Settings.chat_model_primary: str`, `Settings.chat_model_fallback: str` (`@dataclass` from env) | Model name is config, not code |
 | Embedding batching | Up to 512 texts per `embeddings.create(inputs=[...])` call | Mistral free-tier rate-limit friendliness — a 50k-message seed becomes ~98 calls instead of 50k |
 | Retry policy | Exponential backoff on `429` / `5xx`, `MAX_RETRIES = 3`; no circuit breaker | Don't melt the free tier on a seed loop |
-| Sync vs async | **Sync adapters**, sync use case | Matches the rest of the codebase (psycopg sync, sync `RwSession`); Phase 7 may introduce an async stack — re-litigate then |
+| Sync vs async | **Sync adapters**, sync use case | Matches the rest of the codebase (psycopg sync, sync `RwSession`); revisit if an async stack is introduced |
 | Token / cost logging | Always, on every call, success or failure (record 0 tokens on failure) | `rw_copilot_usage` is the audit trail (the `record` call now goes through the `rw_record_copilot_usage` SECURITY DEFINER function, per migration 0140) |
 
 ## Step 1: System prompt — versioned, explicit denials
 
-`PROMPT_VERSION` lives in [`/backend/app/copilot_prompt.py`](../backend/app/copilot_prompt.py) and is embedded verbatim in the prompt body so a `PROMPT_VERSION` bump creates a different string and a different `rw_copilot_usage.rw_model` audit value. The denial taxonomy (below) is documented in `references/denial-taxonomy.md`. The system prompt's wording must match the taxonomy exactly — the BDD tests assert on it. The four codes:
+`PROMPT_VERSION` lives in [`/backend/app/copilot_prompt.py`](../../../backend/app/copilot_prompt.py) and is embedded verbatim in the prompt body so a `PROMPT_VERSION` bump creates a different string and a different `rw_copilot_usage.rw_model` audit value. The denial taxonomy (below) is documented in `references/denial-taxonomy.md`. The system prompt's wording must match the taxonomy exactly — the BDD tests assert on it. The four codes:
 
 - `deny:no-permission`
 - `deny:out-of-scope`

@@ -5,15 +5,9 @@ description: Build, review, debug, or upgrade FastAPI code for the Riwi Co. Inte
 
 # FastAPI Development — Riwi Co. Messaging Platform
 
-> **Skill maintenance notice (verified 2026-08-29).** Per
-> [`/AGENTS.md`](../AGENTS.md) "Skill Maintenance": this skill no
-> longer carries predictive code blocks — every code path below
-> references the shipped file directly. If this file contradicts
-> `/backend/app/*.py`, the source wins.
-
 ## Ground rule: this skill is Riwi Co.-specific
 
-The project's [`/docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) is the source of truth for any architectural question. [`/AGENTS.md`](../AGENTS.md) defines prohibited actions and branching/PR norms. [`/docs/DECISIONS.md`](../docs/DECISIONS.md) is the decision log that justifies the architecture. When this skill and those documents disagree, **trust the documents** — they are reviewed in PR, the skill is not.
+The project's [`/docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) is the source of truth for any architectural question. [`/AGENTS.md`](../../../AGENTS.md) defines prohibited actions and branching/PR norms. [`/docs/DECISIONS.md`](../../../docs/DECISIONS.md) is the decision log that justifies the architecture. When this skill and those documents disagree, **trust the documents** — they are reviewed in PR, the skill is not.
 
 If a stack pin in this file drifts from `/backend/pyproject.toml` (or `uv.lock`), treat the lockfile as authoritative and propose an upgrade PR before relying on the new version.
 
@@ -34,7 +28,7 @@ python -c "import importlib.metadata as m; print('fastapi', m.version('fastapi')
 
 If installed versions are >2 minor behind the latest stable, scan [`fastapi.tiangolo.com/release-notes`](https://fastapi.tiangolo.com/release-notes/) for `Breaking Changes` between the installed and the latest. Same for [Pydantic](https://docs.pydantic.dev/latest/migration/) and [psycopg 3](https://www.psycopg.org/psycopg3/docs/).
 
-**Last verified:** fastapi 0.141.1, pydantic 2.13.4, pydantic-settings 2.15.0, pyjwt 2.13.0, argon2-cffi 25.1.0, psycopg 3.2.x. Pinned via [`/backend/pyproject.toml`](../../backend/pyproject.toml) — confirm against `uv.lock` before relying on this snapshot.
+**Last verified:** fastapi 0.141.1, pydantic 2.13.4, pydantic-settings 2.15.0, pyjwt 2.13.0, argon2-cffi 25.1.0, psycopg 3.2.x. Pinned via [`/backend/pyproject.toml`](../../../backend/pyproject.toml) — confirm against `uv.lock` before relying on this snapshot.
 
 ## Step 2: Project baseline (versions + tooling)
 
@@ -89,7 +83,7 @@ backend/app/
                      #                embedder=..., chatter=...) + middleware wiring
 ```
 
-> **The flat layout is intentional.** Phase 2 chose it; Phase 7 still uses it. The brief's scope did not justify the import-graph move to a nested layout. Don't propose splitting these files in a PR without an issue that names the concrete benefit (e.g. "this file is now > 800 lines and the import surface is fighting").
+> **The flat layout is intentional.** The brief's scope did not justify the import-graph move to a nested layout. Don't propose splitting these files in a PR without an issue that names the concrete benefit (e.g. "this file is now > 800 lines and the import surface is fighting").
 
 Dependency rule (enforced by code review until a linter rule exists):
 
@@ -104,7 +98,7 @@ Dependency rule (enforced by code review until a linter rule exists):
 
 Every request opens **one** psycopg transaction, sets the actor via `SET LOCAL`, and runs every query inside it — including the copilot's vector search. The DB is the single security boundary (`ARCHITECTURE.md §3`); the backend is a thin dispatcher.
 
-See [`/backend/app/infrastructure.py`](../../backend/app/infrastructure.py) — `RwSession` is a sync `__enter__/__exit__` context manager (not async — Phase 2 keeps the simple `psycopg.Connection` shape; Phase 7 swaps to `psycopg_pool.AsyncConnectionPool`). It calls `set_config('app.current_user_id', %s, true)` on entry and commits or rolls back on exit.
+See [`/backend/app/infrastructure.py`](../../../backend/app/infrastructure.py) — `RwSession` is a sync `__enter__/__exit__` context manager on `psycopg.Connection`. It calls `set_config('app.current_user_id', %s, true)` on entry and commits or rolls back on exit.
 
 Use cases never see the connection pool — they receive a `SessionFactory` callable injected via the use-case constructor (DI). Repositories take a `psycopg.Connection` and the use case constructs an adapter (`PostgresUserRepository(conn)`) inside the `RwSession` block so the actor is always set.
 
@@ -118,14 +112,14 @@ Forbidden (from `AGENTS.md`):
 
 ### 4.2 JWT + refresh-rotation middleware
 
-See [`/backend/app/delivery.py`](../../backend/app/delivery.py) (`JwtAuthMiddleware`) and [`/backend/app/auth.py`](../../backend/app/auth.py) (`Refresh` use case). Summary of the shipped behavior:
+See [`/backend/app/delivery.py`](./../../../backend/app/delivery.py) (`JwtAuthMiddleware`) and [`/backend/app/auth.py`](../../../backend/app/auth.py) (`Refresh` use case). Summary of the shipped behavior:
 
 1. `JwtAuthMiddleware` reads `Authorization: Bearer <jwt>`.
 2. Decodes + verifies with `PyJwtService.decode_access` (PyJWT HS256). On PyJWT error: leaves `request.state.actor_id = None` — the route's `Depends(get_current_actor)` enforces 401.
 3. Sets `request.state.actor_id` (a `uuid.UUID`, not a string).
 4. `Refresh` use case validates the presented refresh token (hashed SHA-256 of the plaintext, looked up via the `rw_find_refresh_token(...)` SECURITY DEFINER function — direct table access is REVOKEd from `rw_app`, see migration 0140). On happy path: revoke the old row (via `rw_revoke_refresh_token(...)`), insert a new row under the **same** `rw_family_id`. On reuse (token already revoked): one SQL `UPDATE … WHERE rw_family_id = %s` (via `rw_revoke_refresh_token_family(...)`) revokes every remaining row in the family.
 
-The reuse-detection path MUST `conn.commit()` **before** raising `AuthError` — otherwise `RwSession.__exit__` rolls back the security write and the family stays open. Covered by the BDD scenario in [`/backend/tests/features/auth.feature`](../../backend/tests/features/auth.feature) (`Reusing a revoked refresh token revokes the entire family`) and the unit test `test_reuse_detection_revokes_entire_family` in `tests/unit/application/auth/test_use_cases.py`.
+The reuse-detection path MUST `conn.commit()` **before** raising `AuthError` — otherwise `RwSession.__exit__` rolls back the security write and the family stays open. Covered by the BDD scenario in [`/backend/tests/features/auth.feature`](../../../backend/tests/features/auth.feature) (`Reusing a revoked refresh token revokes the entire family`) and the unit test `test_reuse_detection_revokes_entire_family` in `tests/unit/application/auth/test_use_cases.py`.
 
 Refresh tokens are stored **hashed** in `rw_refresh_token` with `rw_family_id`. Presenting an already-revoked token revokes the **whole family** (reuse/theft detection) — see [Auth0 docs](https://auth0.com/docs/secure/tokens/refresh-tokens/refresh-token-rotation).
 
@@ -151,9 +145,9 @@ async def send_message(
 Per `ARCHITECTURE.md §6`:
 
 - `200` reads · `201` registration · `204` logical delete
-- `400` validation · `401` missing/invalid token · `404` **missing or invisible** (never `403` — would leak existence). See `_STATUS_MAP` in `/backend/app/delivery.py` for the current set of codes (the entry for `'not-author': 403` was removed in PR #33 because nothing raises that code — non-author edits / deletes silently return 404).
-- Errors as RFC 9457 `application/problem+json` (uniform envelope) — *not yet implemented*; tracked under issue #21.
-- Every request gets/accepts `X-Request-Id`, echoed in response, error body, log — *not yet implemented*; tracked under issue #25.
+- `400` validation · `401` missing/invalid token · `404` **missing or invisible** (never `403` — would leak existence). See `_STATUS_MAP` in `/backend/app/delivery.py` for the current set of codes — non-author edits/deletes silently return 404 because no code path raises `'not-author'`.
+- Errors as RFC 9457 `application/problem+json` (uniform envelope) — one envelope, not `{"detail": ...}` vs `{"error": ...}` per route.
+- Every request gets/accepts `X-Request-Id`, echoed in response, error body, log.
 - Keyset pagination, never `OFFSET`
 
 Use FastAPI's `HTTPException` with a custom `ProblemDetail` body, or a project-level exception handler in `delivery.py`. Do **not** return `{"detail": ...}` and `{"error": ...}` in different places — one envelope.
@@ -179,16 +173,16 @@ The write path goes through transactional DB functions/procedures, not raw SQL i
 - `rw_create_channel(...)` — creates channel + first member (creator as `owner`) (Phase 1, 0040).
 - `rw_add_channel_member(...)` — channel owner-only invite; SECURITY DEFINER (Phase 3, 0100). The `rw_channel_member` RLS policy (`rw_user_id = GUC`) lets the actor only see / modify their own membership rows, so adding a *different* user requires the function.
 - `rw_send_message(...)` — inserts message; trigger fills `rw_embedding` (Phase 1, 0040). **Phase 4 (0110) added an `out_was_replay` OUT parameter** so the application can distinguish a fresh insert from an idempotent replay (same `client_ref`) without inspecting timestamps. The route surfaces 201 vs 200 based on this flag; the frontend's *pending → sent → failed* state machine uses the 200 + `X-Idempotent-Replay: true` response to dedupe.
-- `rw_edit_message(...)` — appends `rw_message_edit`, updates body (Phase 1, 0040; procedure). **PR #33 added an explicit author gate inside the procedure body** because the procedure runs as the function owner (which has `BYPASSRLS` *if also `SUPERUSER`*) — without the gate, a non-author could overwrite someone else's message. See `DECISIONS.md` for the lesson learned.
+- `rw_edit_message(...)` — appends `rw_message_edit`, updates body. The procedure body re-enforces the author gate explicitly: the function owner has `BYPASSRLS` *if also `SUPERUSER`*, so RLS alone doesn't block a non-author — the body has to.
 - `rw_delete_message(...)` — logical delete (`rw_deleted_at`, `rw_deleted_reason`) (Phase 1, 0040; procedure).
 - `rw_insert_refresh_token(...)`, `rw_find_refresh_token(...)`, `rw_revoke_refresh_token(...)`, `rw_revoke_refresh_token_family(...)` — Phase 7 (0140) SECURITY DEFINER wrappers around `rw_refresh_token`. The runtime role has no direct table privileges.
 - `rw_record_copilot_usage(...)` — Phase 7 (0140) SECURITY DEFINER wrapper for the §11.4 audit insert.
 
-See [`/backend/db/migrations/0100_rw_add_channel_member.sql`](../../db/migrations/0100_rw_add_channel_member.sql), [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../db/migrations/0110_rw_send_message_replay_flag.sql), and [`/backend/db/migrations/0140_rls_on_user_scoped_tables.sql`](../../db/migrations/0140_rls_on_user_scoped_tables.sql) for the SECURITY DEFINER patterns. The application layer's job is input validation and dispatch — **business rules live in the database**. This is the "thin use cases" rule from `ARCHITECTURE.md §5.1`.
+See [`/backend/db/migrations/0100_rw_add_channel_member.sql`](../../../db/migrations/0100_rw_add_channel_member.sql), [`/backend/db/migrations/0110_rw_send_message_replay_flag.sql`](../../../db/migrations/0110_rw_send_message_replay_flag.sql), and [`/backend/db/migrations/0140_rls_on_user_scoped_tables.sql`](../../../db/migrations/0140_rls_on_user_scoped_tables.sql) for the SECURITY DEFINER patterns. The application layer's job is input validation and dispatch — **business rules live in the database**. This is the "thin use cases" rule from `ARCHITECTURE.md §5.1`.
 
 ### 4.7 CORS for the Vite dev server
 
-The Vite dev server lives on a different origin (default `http://localhost:5173`) than the FastAPI backend (`http://localhost:8000`). `CORSMiddleware` is added to `create_app` in [`/backend/app/main.py`](../../backend/app/main.py) with the allow-list coming from `Settings.cors_origins` (`RW_CORS_ORIGINS` env var, comma-separated) — **no hardcoded ports** (per `docs/DECISIONS.md`). The `cors_origins` parameter lets tests pass an empty list to disable CORS for in-process calls.
+The Vite dev server lives on a different origin (default `http://localhost:5173`) than the FastAPI backend (`http://localhost:8000`). `CORSMiddleware` is added to `create_app` in [`/backend/app/main.py`](../../../backend/app/main.py) with the allow-list coming from `Settings.cors_origins` (`RW_CORS_ORIGINS` env var, comma-separated) — **no hardcoded ports**. The `cors_origins` parameter lets tests pass an empty list to disable CORS for in-process calls.
 
 ### 4.8 Dev entrypoint
 
@@ -205,22 +199,22 @@ Tests use `create_app(settings=..., session_factory=..., embedder=..., chatter=.
 
 ### 4.9 Search + mark-channel-read endpoints (Phase 5)
 
-Two new routes on the messages router (Phase 5, issue #9):
+Two routes on the messages router:
 
 - `GET /api/v1/channels/{channel_id}/search?q=&limit=` — `SearchMessages` use case. The DB function `rw_search_messages(...)` does the heavy lifting (locale from `rw_user.rw_locale`, `ts_headline` with `<mark>` tags, RLS-bypass defense-in-depth check). The route validates `q` 1..200 chars and `limit` 1..50. Returns `{ items: [{rw_id, rw_channel_id, rw_author_id, rw_body, rw_created_at, rw_highlight, is_mine}, …] }`.
-- `POST /api/v1/channels/{channel_id}/read` — `MarkChannelRead` use case. Bulk-marks every visible message as read for the actor. Idempotent. Returns `{ inserted: <n> }` (the count of newly-inserted rows; useful for the API response shape but currently unused by the frontend).
+- `POST /api/v1/channels/{channel_id}/read` — `MarkChannelRead` use case. Bulk-marks every visible message as read for the actor. Idempotent. Returns `{ inserted: <n> }`.
 
-The channel list endpoint (`GET /api/v1/channels`) gained an `unread_count: int` field per channel — backed by `rw_unread_count_for_channel(channel_id, user_id)` called once per channel inside `PostgresChannelRepository.list_visible_with_unread`. The frontend renders the per-channel badge + a total badge in the header. **Keyset pagination on `GET /api/v1/channels` is NOT shipped** — tracked under issue #27.
+The channel list endpoint (`GET /api/v1/channels`) returns an `unread_count: int` field per channel — backed by `rw_unread_count_for_channel(channel_id, user_id)` called once per channel inside `PostgresChannelRepository.list_visible_with_unread`. The frontend renders the per-channel badge + a total badge in the header.
 
-See [`/backend/app/delivery.py:build_messages_router`](../../backend/app/delivery.py) — the Phase 4 `SearchHitOut` + `MarkChannelReadOut` Pydantic models are declared inside `build_messages_router` (the pattern is "wire shape next to the route that returns it"). For more on the DB-side contract, see `Step 9.7` of the postgres-rls-pgvector skill.
+See [`/backend/app/delivery.py:build_messages_router`](../../../backend/app/delivery.py) — the `SearchHitOut` + `MarkChannelReadOut` Pydantic models are declared inside `build_messages_router` (the pattern is "wire shape next to the route that returns it"). For the DB-side contract, see `Step 9.7` of the postgres-rls-pgvector skill.
 
 ## Step 5: Testing — BDD against real PostgreSQL
 
 pytest-bdd + testcontainers-python. The two mandatory scenarios from `ARCHITECTURE.md §10` are the executable spec.
 
-**See the shipped fixture:** [`/backend/tests/conftest.py`](../../backend/tests/conftest.py) — one-line summary: `pg_container` (session-scoped `PostgresContainer("pgvector/pgvector:pg18")`), `_bootstrap` (applies migrations + creates `rw_app_login` with the test password, *skipping* `0002_roles.sql`), `super_conn` (superuser — setup only), `actor_conn` (`rw_app_login` — every read-and-assert goes here), `pg_super_url` / `pg_app_url`. Each scenario sets the actor GUC per request via `RwSession` (mirrors the production code path exactly). **Tests never connect as a `BYPASSRLS` role for the query under test** — that's the whole point of the exercise.
+**See the shipped fixture:** [`/backend/tests/conftest.py`](../../../backend/tests/conftest.py) — one-line summary: `pg_container` (session-scoped `PostgresContainer("pgvector/pgvector:pg18")`), `_bootstrap` (applies migrations + creates `rw_app_login` with the test password, *skipping* `0002_roles.sql`), `super_conn` (superuser — setup only), `actor_conn` (`rw_app_login` — every read-and-assert goes here), `pg_super_url` / `pg_app_url`. Each scenario sets the actor GUC per request via `RwSession` (mirrors the production code path exactly). **Tests never connect as a `BYPASSRLS` role for the query under test** — that's the whole point of the exercise.
 
-Use FastAPI's `TestClient` (built on `httpx`) with the `create_app(settings=..., session_factory=..., embedder=..., chatter=...)` factory. For the `embedder` / `chatter` injection in tests, see [`/backend/tests/fake_chat_provider.py`](../../backend/tests/fake_chat_provider.py) — `FakeEmbeddingProvider`, `FakeChatProvider`, and `_reset_default()`.
+Use FastAPI's `TestClient` (built on `httpx`) with the `create_app(settings=..., session_factory=..., embedder=..., chatter=...)` factory. For the `embedder` / `chatter` injection in tests, see [`/backend/tests/fake_chat_provider.py`](../../../backend/tests/fake_chat_provider.py) — `FakeEmbeddingProvider`, `FakeChatProvider`, and `_reset_default()`.
 
 ## Step 6: Avoid deprecated/legacy patterns
 
