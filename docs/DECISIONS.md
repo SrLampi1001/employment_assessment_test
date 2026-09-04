@@ -778,3 +778,90 @@ ARCHITECTURE.md was updated to reflect the current RLS-enabled table set (7 tabl
 docs/ARCHITECTURE.md                                      # Â§3 RLS table; Â§6 endpoint status; Â§11 service count; Â§12 React skill note
 docs/DECISIONS.md                                         # this entry
 ```
+
+---
+
+## Phase 7 — Roadmap to v0.1.0 (4 sprints)
+
+Recorded after the Lovable frontend migration (#36) merged into `develop`. Captures the agreed execution order for the issues still open at the start of Phase 7, so the next contributor (human or AI) follows the same critical path without re-deriving it from the issue board.
+
+### Status snapshot at the start of Phase 7
+
+- **Shipped**: Phases 0–6 (dev env → DB+RLS → auth → channels → messages → search → copilot). `develop` carries the Lovable-UI frontend and is releasable on paper.
+- **Open**: 29 issues — 3 high-priority (security/ARCH contract), 4 medium-priority ARCH gaps, ~12 small UX/demo issues, plus several large enhancements.
+- **Gate**: issue **#8 (Phase 7 — Polish + v0.1.0 demo, Docker only)** is the release umbrella. No `v0.1.0` tag is cut until the Sprints 1–3 items below are green.
+- **Note**: PR #33 title says "close out issues #22 + #23" but both issues still report `OPEN` against `develop`. Sprint 1 verifies whether the acceptance criteria are met; if yes, the PR-merge message closes them; if no, the missing work folds into the Sprint 1 PRs below.
+
+### Sprint 1 — Security & ARCH contract gaps (HIGH)
+
+Close the ARCH §3 + §6 gaps the demo will visibly expose. One PR per issue, branched from `develop`, named `fix/issue-<n>-<slug>`.
+
+| Order | Issue | Why first |
+|---|---|---|
+| 1 | **#25** `feat(observability): X-Request-Id correlation middleware` | ARCH §6; prerequisite for #21 (problem+json must include the correlation id) |
+| 2 | **#21** `feat(api): RFC 9457 application/problem+json envelope for handled errors` | ARCH §6; the frontend denial banners (#50) key off `type` |
+| 3 | **#22** `security(db): enable RLS on rw_refresh_token and rw_copilot_usage` | ARCH §3 defense-in-depth — verify PR #33's SECURITY DEFINER wrappers, then add the table-level RLS policies + CI rowsecurity assertion |
+| 4 | **#23** `security(api): not-author must return 404, not 403` | ARCH §6; verify PR #33's status-map change + BDD coverage; close the issue or finish the gap |
+| 5 | **#24** `db(embeddings): trg_message_embedding doesn't compute embeddings` | RAG context is effectively broken for seeded messages — the demo's "ask the copilot" flow degrades silently; the fix renames the trigger to `trg_message_embedding_guard` and adds a post-load embed pass in `backend/scripts/seed.py` (Option A from the issue body) |
+
+Sprint 1 is the gating block: a v0.1.0 demo with the current RAG behaviour (seeded messages invisible to HNSW) is not credible, and the open ARCH §3/§6 gaps would survive a reviewer audit.
+
+### Sprint 2 — Demo-polish ARCH gaps (MEDIUM)
+
+What a reviewer sees in the 5-minute demo and judges the product on. Pairs that share a migration ship as one PR.
+
+| Issue(s) | Why |
+|---|---|
+| **#38** `feat(backend): resolve message author display name in wire shape` | Conversation renders `559bf207 said …` instead of `Valentina Restrepo` — instant credibility hit |
+| **#41 + #42** direct-channel uniqueness + display-name resolution | Ship as one PR: partial unique index on `rw_channel(rw_name) WHERE rw_kind = 2`, then resolve the other party's `rw_display_name` in `ChannelOut.display_name` |
+| **#26** `feat(profile): PATCH /api/v1/me + third ARCH §8 zone` | The third side-by-side panel (conversations / copilot / **profile**) is required by ARCH §8; today the locale picker does not persist |
+| **#30** `feat(messages): replace "Load more" button with IntersectionObserver` | ARCH §8 explicit requirement (`react-infinite-scroll-component`, ~4 kB gzipped, React 19 compatible) |
+| **#40** `fix: self-send does not count as unread` | Presence-based suppression for messages the actor authored themselves |
+
+### Sprint 3 — Frontend regressions surfaced by PR #36 (SMALL)
+
+All surfaced or introduced by the Lovable migration. Cheap, high signal, all `effort: small`.
+
+| Issue | Notes |
+|---|---|
+| **#47** poll reconciler drops deleted messages | Regression: `Conversation.tsx:115-137` only appends, never reconciles deletions |
+| **#52** `aria-label` every icon-only button + axe-playwright in CI | Prerequisite for the e2e suite (#50) |
+| **#37** Copilot textarea — Enter to send, Shift+Enter for newline | Mirror the convention already correct in `Conversation.tsx:494-499` |
+| **#49** register locale picker retranslates immediately | i18n change should retranslate without a reload |
+| **#48** conversation search — restore hit count + i18n keys | |
+| **#46** replace `window.confirm` with a styled modal for leave-channel | |
+
+### Sprint 4 — Defer past v0.1.0 (LARGE / architecture)
+
+Sequence after the `v0.1.0` tag is pushed. None of these block the demo.
+
+| Issue | Why deferred |
+|---|---|
+| **#50** Playwright e2e suite (happy path, auth boundary, denial taxonomy) | Needs the demo to stabilize; pairs with #52 (axe) |
+| **#8** v0.1.0 demo tag (`release/v0.1.0` → `main`) | Closes after Sprints 1–3 green |
+| **#29** Backend → Clean Architecture split per ARCH §5.2 | Refactor; do in a quiet week |
+| **#28** Pinned versions (`FastAPI 0.12x → current`, `pytest ≥ 9`, `frontend Dockerfile node:24-alpine`) | Housekeeping; pairs with #29 |
+| **#43** `/profile` route + bio/avatar columns | Depends on #26 |
+| **#44** "Add member" UI + `/api/v1/users/search` picker | After #41 lands (direct-channel uniqueness) |
+| **#45** `feat(copilot): per-actor session + message persistence + history view` | Requires ADR per issue body |
+| **#39** `feat(copilot): recognise greetings + add chat-member / time / opt-in-location tools` | Requires ADR per issue body |
+| **#35** local markdown link check to enforce no-ghost-references | Trivial; slot in any time |
+| **#51** `chore(seed): align seed direct-channel names with the canonical pattern` | Cosmetic; pairs with #41/#42 |
+
+### Critical path
+
+```
+Sprint 1 ──► Sprint 2 ──► Sprint 3 ──► release/v0.1.0 ──► tag v0.1.0 (#8)
+```
+
+Estimated scope: 5 + 5 + 6 = ~16 PRs before the tag. Sprint 1 and Sprint 3 are pure `effort: small`; Sprint 2 carries the only `effort: medium` items. Issue #24 is the work item this branch is opened against and the seed-side anchor of Sprint 1 step 5.
+
+### File map (this entry)
+
+```
+docs/DECISIONS.md                                         # this entry (Phase 7 roadmap)
+db/migrations/0050_triggers.sql                           # follow-up PR: rename + clarify trg_message_embedding_guard
+backend/scripts/seed.py                                   # follow-up PR: post-load embed pass
+docs/ARCHITECTURE.md                                      # follow-up PR: align §3 + §4.2 prose with the chosen option
+docs/DECISIONS.md                                         # follow-up PR: record the chosen path
+```
