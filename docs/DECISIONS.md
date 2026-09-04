@@ -865,3 +865,62 @@ backend/scripts/seed.py                                   # follow-up PR: post-l
 docs/ARCHITECTURE.md                                      # follow-up PR: align §3 + §4.2 prose with the chosen option
 docs/DECISIONS.md                                         # follow-up PR: record the chosen path
 ```
+
+---
+
+## Phase 7 — `trg_message_embedding` was a guardrail, not an embedder (issue #24)
+
+### The hole
+
+The shipped trigger in `db/migrations/0050_triggers.sql` was named `trg_message_embedding` and the function was `rw_compute_message_embedding()`. The names implied a self-computing embedder. Reality: the body was a no-op stub that only `RAISE WARNING`ed when `rw_embedding IS NULL`. Embeddings were never computed inside PostgreSQL (no HTTP from PG) — they were filled by the application layer on the `rw_send_message(...)` path.
+
+Net effect: messages created via the live API got embedded and were visible to HNSW. Messages loaded by the seed script did **not** get embedded (the seed inserted `rw_body` but never called `MistralAdapter`), so any copilot question whose answer lived only in seed data got an empty `rw_visible_message` scan and `PostgresMessageRepository.search_similar`'s `distance = 1e9` fallback (the one that papers over `NULL` embeddings) pushed them to the bottom of the rank — but they were effectively excluded from RAG context.
+
+### Why it went undetected for so long
+
+- The BDD scenarios that exercise the copilot (`tests/features/copilot.feature`) seed their own data via the API path, so RAG context was always populated. The gap only surfaced for any test or live run that relied on the seed script.
+- The `distance = 1e9` fallback in `backend/app/infrastructure.py:631-635` is a defence-in-depth sentinel that prevents a runtime crash on `NULL` embeddings — it silently hides the data-coverage bug behind a no-error path.
+- `backend/scripts/smoke_copilot_live.py` (Phase 6 finish-up) only worked because live `POST /messages` calls Mistral in the application layer.
+
+### The fix (Option A from issue #24)
+
+1. **Rename the trigger and the function** so the guardrail role is obvious. Migration `0150_trg_message_embedding_guard.sql` drops `trg_message_embedding`, drops `rw_compute_message_embedding()`, creates `rw_guard_message_embedding()`, and creates `trg_message_embedding_guard` on `rw_message` `AFTER INSERT OR UPDATE OF rw_body`. Body unchanged — still a `RAISE WARNING` when the row landed without one.
+2. **Move the actual embedding computation to the application layer** in `backend/scripts/seed.py`. New private helper `_embed_messages(cur, embedder, batch_size=512)`:
+   - `SELECT rw_id, rw_body FROM rw_message WHERE rw_embedding IS NULL AND rw_deleted_at IS NULL ORDER BY rw_id`
+   - For each batch ≤512: `embedder.embed([...])` (structural `_EmbeddingProvider` Protocol, matches `app.domain.EmbeddingProvider` so `MistralAdapter` and `FakeEmbeddingProvider` both work)
+   - One `UPDATE rw_message AS m SET rw_embedding = v.embedding::vector FROM unnest(%s::uuid[], %s::text[]) AS v(rw_id, embedding) WHERE m.rw_id = v.rw_id` per batch — same `vec_lit = "[" + ",".join(repr(float(v)) for v in vec) + "]"` pattern as `infrastructure.py:611`, so pgvector parses the JSON array literal.
+3. **`load()` / `load_from_payload()` accept an optional `embedder`.** Backward-compatible: when no embedder is passed the pass is skipped (current behaviour, tests that don't care keep working). `SeedCounts` gained a `embedded: int` field.
+4. **`main()` builds a `MistralAdapter` from `MISTRAL_API_KEY`** when the key is set. Missing key → WARNING + skip (CI without secrets still works).
+5. **`docs/ARCHITECTURE.md §3 + §4.2`** now describe the split: app layer fills embeddings on the `rw_send_message(...)` path and on the seed post-load pass; the DB trigger only warns.
+
+### Tests
+
+`backend/tests/unit/scripts/test_seed.py` grew four tests:
+
+- `test_load_without_embedder_skips_embed_pass` — back-compat: no embedder → 5 rows NULL.
+- `test_load_with_embedder_populates_every_message` — with `FakeEmbeddingProvider()` → `embedded == 5`, zero NULL rows, vector text starts with `[`.
+- `test_load_with_embedder_calls_batched` — 5 bodies fit in a single ≤512 batch; asserts the contract from `ai-provider-integration` without coupling the test to `MistralAdapter`.
+- `test_embed_pass_is_idempotent` — re-run with an embedder leaves every row embedded.
+
+The two pre-existing fixtures (`loaded_db`, `test_loaded_data_respects_rls`) keep working unchanged — they exercise the `embedder=None` path.
+
+Full backend suite: **116 passed, 2 skipped (env-gated smoke tests)**.
+
+### Why Option A and not Option B
+
+Issue #24 listed two paths:
+
+- **Option A (chosen):** rename the trigger to `trg_message_embedding_guard` + app-side embed pass.
+- **Option B:** keep the trigger name and make `rw_embedding` truly `NOT NULL`, letting the app fail loudly if the embed call misses.
+
+Option B would have forced every code path that inserts into `rw_message` to embed inside the application (which we already do for `rw_send_message`) AND to add a `DEFAULT` for the seed path that doesn't have an embedder handy (e.g. CI without `MISTRAL_API_KEY`). The guardrail-as-warning pattern is the project's existing norm for "this should not have happened" (see the `rw_channel_member.rw_left_at IS NULL` partial unique index for the same shape), so Option A fits the codebase's posture better.
+
+### File map (this entry)
+
+```
+db/migrations/0150_trg_message_embedding_guard.sql        # NEW — rename trigger + function, keep guardrail body
+backend/scripts/seed.py                                   # add _embed_messages + optional embedder param + _build_default_embedder()
+backend/tests/unit/scripts/test_seed.py                   # +4 tests for the embed pass (issue #24)
+docs/ARCHITECTURE.md                                      # §3 trigger row + §4.2 one-chunk sentence sync
+docs/DECISIONS.md                                         # this entry
+```
