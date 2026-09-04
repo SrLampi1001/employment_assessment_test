@@ -778,3 +778,149 @@ ARCHITECTURE.md was updated to reflect the current RLS-enabled table set (7 tabl
 docs/ARCHITECTURE.md                                      # Â§3 RLS table; Â§6 endpoint status; Â§11 service count; Â§12 React skill note
 docs/DECISIONS.md                                         # this entry
 ```
+
+---
+
+## Phase 7 — Roadmap to v0.1.0 (4 sprints)
+
+Recorded after the Lovable frontend migration (#36) merged into `develop`. Captures the agreed execution order for the issues still open at the start of Phase 7, so the next contributor (human or AI) follows the same critical path without re-deriving it from the issue board.
+
+### Status snapshot at the start of Phase 7
+
+- **Shipped**: Phases 0–6 (dev env → DB+RLS → auth → channels → messages → search → copilot). `develop` carries the Lovable-UI frontend and is releasable on paper.
+- **Open**: 29 issues — 3 high-priority (security/ARCH contract), 4 medium-priority ARCH gaps, ~12 small UX/demo issues, plus several large enhancements.
+- **Gate**: issue **#8 (Phase 7 — Polish + v0.1.0 demo, Docker only)** is the release umbrella. No `v0.1.0` tag is cut until the Sprints 1–3 items below are green.
+- **Note**: PR #33 title says "close out issues #22 + #23" but both issues still report `OPEN` against `develop`. Sprint 1 verifies whether the acceptance criteria are met; if yes, the PR-merge message closes them; if no, the missing work folds into the Sprint 1 PRs below.
+
+### Sprint 1 — Security & ARCH contract gaps (HIGH)
+
+Close the ARCH §3 + §6 gaps the demo will visibly expose. One PR per issue, branched from `develop`, named `fix/issue-<n>-<slug>`.
+
+| Order | Issue | Why first |
+|---|---|---|
+| 1 | **#25** `feat(observability): X-Request-Id correlation middleware` | ARCH §6; prerequisite for #21 (problem+json must include the correlation id) |
+| 2 | **#21** `feat(api): RFC 9457 application/problem+json envelope for handled errors` | ARCH §6; the frontend denial banners (#50) key off `type` |
+| 3 | **#22** `security(db): enable RLS on rw_refresh_token and rw_copilot_usage` | ARCH §3 defense-in-depth — verify PR #33's SECURITY DEFINER wrappers, then add the table-level RLS policies + CI rowsecurity assertion |
+| 4 | **#23** `security(api): not-author must return 404, not 403` | ARCH §6; verify PR #33's status-map change + BDD coverage; close the issue or finish the gap |
+| 5 | **#24** `db(embeddings): trg_message_embedding doesn't compute embeddings` | RAG context is effectively broken for seeded messages — the demo's "ask the copilot" flow degrades silently; the fix renames the trigger to `trg_message_embedding_guard` and adds a post-load embed pass in `backend/scripts/seed.py` (Option A from the issue body) |
+
+Sprint 1 is the gating block: a v0.1.0 demo with the current RAG behaviour (seeded messages invisible to HNSW) is not credible, and the open ARCH §3/§6 gaps would survive a reviewer audit.
+
+### Sprint 2 — Demo-polish ARCH gaps (MEDIUM)
+
+What a reviewer sees in the 5-minute demo and judges the product on. Pairs that share a migration ship as one PR.
+
+| Issue(s) | Why |
+|---|---|
+| **#38** `feat(backend): resolve message author display name in wire shape` | Conversation renders `559bf207 said …` instead of `Valentina Restrepo` — instant credibility hit |
+| **#41 + #42** direct-channel uniqueness + display-name resolution | Ship as one PR: partial unique index on `rw_channel(rw_name) WHERE rw_kind = 2`, then resolve the other party's `rw_display_name` in `ChannelOut.display_name` |
+| **#26** `feat(profile): PATCH /api/v1/me + third ARCH §8 zone` | The third side-by-side panel (conversations / copilot / **profile**) is required by ARCH §8; today the locale picker does not persist |
+| **#30** `feat(messages): replace "Load more" button with IntersectionObserver` | ARCH §8 explicit requirement (`react-infinite-scroll-component`, ~4 kB gzipped, React 19 compatible) |
+| **#40** `fix: self-send does not count as unread` | Presence-based suppression for messages the actor authored themselves |
+
+### Sprint 3 — Frontend regressions surfaced by PR #36 (SMALL)
+
+All surfaced or introduced by the Lovable migration. Cheap, high signal, all `effort: small`.
+
+| Issue | Notes |
+|---|---|
+| **#47** poll reconciler drops deleted messages | Regression: `Conversation.tsx:115-137` only appends, never reconciles deletions |
+| **#52** `aria-label` every icon-only button + axe-playwright in CI | Prerequisite for the e2e suite (#50) |
+| **#37** Copilot textarea — Enter to send, Shift+Enter for newline | Mirror the convention already correct in `Conversation.tsx:494-499` |
+| **#49** register locale picker retranslates immediately | i18n change should retranslate without a reload |
+| **#48** conversation search — restore hit count + i18n keys | |
+| **#46** replace `window.confirm` with a styled modal for leave-channel | |
+
+### Sprint 4 — Defer past v0.1.0 (LARGE / architecture)
+
+Sequence after the `v0.1.0` tag is pushed. None of these block the demo.
+
+| Issue | Why deferred |
+|---|---|
+| **#50** Playwright e2e suite (happy path, auth boundary, denial taxonomy) | Needs the demo to stabilize; pairs with #52 (axe) |
+| **#8** v0.1.0 demo tag (`release/v0.1.0` → `main`) | Closes after Sprints 1–3 green |
+| **#29** Backend → Clean Architecture split per ARCH §5.2 | Refactor; do in a quiet week |
+| **#28** Pinned versions (`FastAPI 0.12x → current`, `pytest ≥ 9`, `frontend Dockerfile node:24-alpine`) | Housekeeping; pairs with #29 |
+| **#43** `/profile` route + bio/avatar columns | Depends on #26 |
+| **#44** "Add member" UI + `/api/v1/users/search` picker | After #41 lands (direct-channel uniqueness) |
+| **#45** `feat(copilot): per-actor session + message persistence + history view` | Requires ADR per issue body |
+| **#39** `feat(copilot): recognise greetings + add chat-member / time / opt-in-location tools` | Requires ADR per issue body |
+| **#35** local markdown link check to enforce no-ghost-references | Trivial; slot in any time |
+| **#51** `chore(seed): align seed direct-channel names with the canonical pattern` | Cosmetic; pairs with #41/#42 |
+
+### Critical path
+
+```
+Sprint 1 ──► Sprint 2 ──► Sprint 3 ──► release/v0.1.0 ──► tag v0.1.0 (#8)
+```
+
+Estimated scope: 5 + 5 + 6 = ~16 PRs before the tag. Sprint 1 and Sprint 3 are pure `effort: small`; Sprint 2 carries the only `effort: medium` items. Issue #24 is the work item this branch is opened against and the seed-side anchor of Sprint 1 step 5.
+
+### File map (this entry)
+
+```
+docs/DECISIONS.md                                         # this entry (Phase 7 roadmap)
+db/migrations/0050_triggers.sql                           # follow-up PR: rename + clarify trg_message_embedding_guard
+backend/scripts/seed.py                                   # follow-up PR: post-load embed pass
+docs/ARCHITECTURE.md                                      # follow-up PR: align §3 + §4.2 prose with the chosen option
+docs/DECISIONS.md                                         # follow-up PR: record the chosen path
+```
+
+---
+
+## Phase 7 — `trg_message_embedding` was a guardrail, not an embedder (issue #24)
+
+### The hole
+
+The shipped trigger in `db/migrations/0050_triggers.sql` was named `trg_message_embedding` and the function was `rw_compute_message_embedding()`. The names implied a self-computing embedder. Reality: the body was a no-op stub that only `RAISE WARNING`ed when `rw_embedding IS NULL`. Embeddings were never computed inside PostgreSQL (no HTTP from PG) — they were filled by the application layer on the `rw_send_message(...)` path.
+
+Net effect: messages created via the live API got embedded and were visible to HNSW. Messages loaded by the seed script did **not** get embedded (the seed inserted `rw_body` but never called `MistralAdapter`), so any copilot question whose answer lived only in seed data got an empty `rw_visible_message` scan and `PostgresMessageRepository.search_similar`'s `distance = 1e9` fallback (the one that papers over `NULL` embeddings) pushed them to the bottom of the rank — but they were effectively excluded from RAG context.
+
+### Why it went undetected for so long
+
+- The BDD scenarios that exercise the copilot (`tests/features/copilot.feature`) seed their own data via the API path, so RAG context was always populated. The gap only surfaced for any test or live run that relied on the seed script.
+- The `distance = 1e9` fallback in `backend/app/infrastructure.py:631-635` is a defence-in-depth sentinel that prevents a runtime crash on `NULL` embeddings — it silently hides the data-coverage bug behind a no-error path.
+- `backend/scripts/smoke_copilot_live.py` (Phase 6 finish-up) only worked because live `POST /messages` calls Mistral in the application layer.
+
+### The fix (Option A from issue #24)
+
+1. **Rename the trigger and the function** so the guardrail role is obvious. Migration `0150_trg_message_embedding_guard.sql` drops `trg_message_embedding`, drops `rw_compute_message_embedding()`, creates `rw_guard_message_embedding()`, and creates `trg_message_embedding_guard` on `rw_message` `AFTER INSERT OR UPDATE OF rw_body`. Body unchanged — still a `RAISE WARNING` when the row landed without one.
+2. **Move the actual embedding computation to the application layer** in `backend/scripts/seed.py`. New private helper `_embed_messages(cur, embedder, batch_size=512)`:
+   - `SELECT rw_id, rw_body FROM rw_message WHERE rw_embedding IS NULL AND rw_deleted_at IS NULL ORDER BY rw_id`
+   - For each batch ≤512: `embedder.embed([...])` (structural `_EmbeddingProvider` Protocol, matches `app.domain.EmbeddingProvider` so `MistralAdapter` and `FakeEmbeddingProvider` both work)
+   - One `UPDATE rw_message AS m SET rw_embedding = v.embedding::vector FROM unnest(%s::uuid[], %s::text[]) AS v(rw_id, embedding) WHERE m.rw_id = v.rw_id` per batch — same `vec_lit = "[" + ",".join(repr(float(v)) for v in vec) + "]"` pattern as `infrastructure.py:611`, so pgvector parses the JSON array literal.
+3. **`load()` / `load_from_payload()` accept an optional `embedder`.** Backward-compatible: when no embedder is passed the pass is skipped (current behaviour, tests that don't care keep working). `SeedCounts` gained a `embedded: int` field.
+4. **`main()` builds a `MistralAdapter` from `MISTRAL_API_KEY`** when the key is set. Missing key → WARNING + skip (CI without secrets still works).
+5. **`docs/ARCHITECTURE.md §3 + §4.2`** now describe the split: app layer fills embeddings on the `rw_send_message(...)` path and on the seed post-load pass; the DB trigger only warns.
+
+### Tests
+
+`backend/tests/unit/scripts/test_seed.py` grew four tests:
+
+- `test_load_without_embedder_skips_embed_pass` — back-compat: no embedder → 5 rows NULL.
+- `test_load_with_embedder_populates_every_message` — with `FakeEmbeddingProvider()` → `embedded == 5`, zero NULL rows, vector text starts with `[`.
+- `test_load_with_embedder_calls_batched` — 5 bodies fit in a single ≤512 batch; asserts the contract from `ai-provider-integration` without coupling the test to `MistralAdapter`.
+- `test_embed_pass_is_idempotent` — re-run with an embedder leaves every row embedded.
+
+The two pre-existing fixtures (`loaded_db`, `test_loaded_data_respects_rls`) keep working unchanged — they exercise the `embedder=None` path.
+
+Full backend suite: **116 passed, 2 skipped (env-gated smoke tests)**.
+
+### Why Option A and not Option B
+
+Issue #24 listed two paths:
+
+- **Option A (chosen):** rename the trigger to `trg_message_embedding_guard` + app-side embed pass.
+- **Option B:** keep the trigger name and make `rw_embedding` truly `NOT NULL`, letting the app fail loudly if the embed call misses.
+
+Option B would have forced every code path that inserts into `rw_message` to embed inside the application (which we already do for `rw_send_message`) AND to add a `DEFAULT` for the seed path that doesn't have an embedder handy (e.g. CI without `MISTRAL_API_KEY`). The guardrail-as-warning pattern is the project's existing norm for "this should not have happened" (see the `rw_channel_member.rw_left_at IS NULL` partial unique index for the same shape), so Option A fits the codebase's posture better.
+
+### File map (this entry)
+
+```
+db/migrations/0150_trg_message_embedding_guard.sql        # NEW — rename trigger + function, keep guardrail body
+backend/scripts/seed.py                                   # add _embed_messages + optional embedder param + _build_default_embedder()
+backend/tests/unit/scripts/test_seed.py                   # +4 tests for the embed pass (issue #24)
+docs/ARCHITECTURE.md                                      # §3 trigger row + §4.2 one-chunk sentence sync
+docs/DECISIONS.md                                         # this entry
+```
