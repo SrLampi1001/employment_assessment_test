@@ -192,7 +192,7 @@ Transactional logic in the database:
 | `rw_add_channel_member(...)` | Function (SECURITY DEFINER) | Phase 3 — owner-only invite. RLS forbids an actor from inserting a `rw_channel_member` row for a different user, so this function runs as the migrator and re-checks the owner invariant in its body. |
 | `rw_search_messages(...)`, `rw_unread_count_for_channel(...)`, `rw_mark_channel_read(...)` | Functions (SECURITY DEFINER) | Phase 5 — lexical search + per-channel unread + bulk mark-read. All three re-check membership + GUC actor in their bodies for the same reason. |
 | `rw_insert_refresh_token / rw_find_refresh_token / rw_revoke_refresh_token / rw_revoke_refresh_token_family / rw_record_copilot_usage` | Functions (SECURITY DEFINER) | Phase 7 — every read/write against `rw_refresh_token` and `rw_copilot_usage` goes through these functions; the application role has only `EXECUTE` on them (no direct table privileges). Necessary because the login flow runs with `actor_id = None`, which would otherwise be blocked by a pure RLS policy. |
-| Trigger `trg_message_embedding` | Trigger | `AFTER INSERT OR UPDATE OF rw_body` on `rw_message` → `RAISE WARNING` if a row landed without an embedding (the seed script can't silently skip the embed step). Currently a no-op stub in production deployments — the seed script populates `rw_embedding` directly. |
+| Trigger `trg_message_embedding_guard` | Trigger | `AFTER INSERT OR UPDATE OF rw_body` on `rw_message` → `RAISE WARNING` if a row landed without an embedding (the seed script and the application send-path can't silently skip the embed step). Renamed from `trg_message_embedding` in Phase 7 to make the guardrail role explicit — the trigger never computes embeddings (no HTTP from PostgreSQL); embeddings are populated by the application layer (`MistralAdapter` on `rw_send_message(...)`) and by `backend/scripts/seed.py`'s post-load embed pass (closes issue #24). |
 | Trigger `trg_message_read_channel` | Trigger | Phase 7 — `BEFORE INSERT` on `rw_message_read` populates `rw_channel_id` from the referenced `rw_message.rw_channel_id` so the `(rw_user_id, rw_channel_id)` index stays correct without application-side awareness. |
 
 **RLS-enabled tables (current, verified 2026-08-29):**
@@ -237,7 +237,7 @@ sequenceDiagram
 
 ### 4.2 Key decisions
 
-- **One chunk = one message** (latest body). The embedding trigger keeps the vector and the content in lockstep — there is no mirror store and nothing to synchronize.
+- **One chunk = one message** (latest body). The application layer keeps the vector and the content in lockstep — embeddings are filled by `MistralAdapter` on the `rw_send_message(...)` path and by `backend/scripts/seed.py`'s post-load embed pass during seeding. The DB trigger `trg_message_embedding_guard` only `RAISE WARNING`s if a row landed without one; it does not compute embeddings (no HTTP from PostgreSQL). There is no mirror store and nothing to synchronize.
 - **No mirror vector database.** The embedding lives in the RLS-protected row, so similarity search is permission-filtered for free, with nothing to leak.
 - **Interchangeable provider:** the backend defines separate `EmbeddingProvider` (→ Mistral SDK) and `ChatProvider` (→ NVIDIA NIM via an OpenAI-compatible client) ports. Both are configuration-driven; the use cases depend only on the ports.
 - **System prompt versioned** (constant in the repo, logged per request); retrieved messages are wrapped in explicit delimiters and labelled untrusted inside the prompt.
